@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import os
+import shutil
+
+from . import detect
+from .tui import BAD, DIM, LABEL, OK, RESET, TEXT, WARN
+
+
+def _say(msg: str = "") -> None:
+    print(msg)
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    suffix = f" {DIM}[{default}]{RESET}" if default else ""
+    try:
+        got = input(f"{LABEL}?{RESET} {prompt}{suffix} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit("\ncancelled")
+    return got or default
+
+
+def _yes(prompt: str, default: bool = True) -> bool:
+    d = "Y/n" if default else "y/N"
+    got = _ask(f"{prompt} {DIM}({d}){RESET}").lower()
+    return default if not got else got.startswith("y")
+
+
+def _ok(msg: str) -> None:
+    _say(f"  {OK}✓{RESET} {msg}")
+
+
+def _bad(msg: str) -> None:
+    _say(f"  {BAD}✗{RESET} {msg}")
+
+
+def _warn(msg: str) -> None:
+    _say(f"  {WARN}!{RESET} {msg}")
+
+
+def run(config_path: str, force: bool = False) -> int:
+    from . import banner
+
+    _say(banner.render())
+    _say(banner.tagline())
+    _say()
+
+    if os.path.exists(config_path) and not force:
+        if not _yes(f"{config_path} exists. Overwrite?", False):
+            return 1
+
+    _say(f"{TEXT}Looking for a gateway that grants port forwards…{RESET}")
+    cands = detect.gateway_candidates()
+    gateway = None
+    for gw, why in cands:
+        pub = detect.natpmp_probe(gw)
+        if pub:
+            _ok(f"{gw} answers NAT-PMP — public address {pub}   {DIM}({why}){RESET}")
+            gateway = gw
+            break
+        _say(f"  {DIM}· {gw} no reply ({why}){RESET}")
+
+    source_type = "natpmp"
+    if not gateway:
+        _bad("nothing here speaks NAT-PMP.")
+        _say(f"    {DIM}Common causes: the VPN is down, port forwarding is off in")
+        _say(f"    your provider's settings, or your router uses UPnP instead.{RESET}")
+        if _yes("Use the `command` source instead (any script that prints a port)?", False):
+            source_type = "command"
+        else:
+            gateway = _ask("Gateway address to use anyway", "10.2.0.1")
+
+    _say()
+    _say(f"{TEXT}Cloudflare{RESET}")
+    domain = _ask("Domain your records live under (e.g. play.example.com)")
+    if not domain:
+        _bad("a domain is required")
+        return 1
+
+    token = os.environ.get("FYRWIRE_CF_TOKEN", "")
+    if token:
+        _say(f"  {DIM}using FYRWIRE_CF_TOKEN from the environment{RESET}")
+    else:
+        _say(f"  {DIM}Create one at dash.cloudflare.com → My Profile → API Tokens,")
+        _say(f"  using the 'Edit zone DNS' template for this zone.{RESET}")
+        token = _ask("API token")
+    if not token:
+        _bad("a token is required")
+        return 1
+
+    good, why = detect.verify_token(token)
+    if not good:
+        _bad(f"token rejected: {why}")
+        return 1
+    _ok(f"token valid ({why})")
+
+    zone_id, zone_name = detect.find_zone(token, domain)
+    if not zone_id:
+        _bad(zone_name)
+        return 1
+    _ok(f"zone {zone_name} → {zone_id}")
+
+    can, why = detect.can_edit_zone(token, zone_id)
+    if not can:
+        _bad(f"token cannot read that zone's DNS: {why}")
+        _say(f"    {DIM}This is the failure that looks like success -- Cloudflare")
+        _say(f"    answers HTTP 200 for it. Re-create the token with Zone:DNS:Edit.{RESET}")
+        return 1
+    _ok("token can manage DNS in that zone")
+
+    _say()
+    _say(f"{TEXT}Services to publish{RESET}")
+    listening = detect.listening_ports()
+    if listening:
+        for i, (port, proc) in enumerate(listening, 1):
+            _say(f"  {DIM}{i}){RESET} {port:<7} {DIM}{proc or '?'}{RESET}")
+        picked = _ask("Numbers to expose, comma separated (or blank to enter manually)")
+    else:
+        picked = ""
+
+    services = []
+    chosen: list[tuple[int, str]] = []
+    if picked:
+        for tok in picked.split(","):
+            tok = tok.strip()
+            if tok.isdigit() and 1 <= int(tok) <= len(listening):
+                chosen.append(listening[int(tok) - 1])
+    if not chosen:
+        p = _ask("Port to expose", "25565")
+        chosen = [(int(p), "")]
+
+    a_name = _ask("Name for THIS MACHINE's address record", f"node.{zone_name}")
+    for port, proc in chosen:
+        _say(f"  {DIM}service on port {port} ({proc or 'unknown'}){RESET}")
+        key = _ask("  short name", proc or f"svc{port}")
+        proto = _ask("  protocol", "tcp")
+        srv = _ask("  SRV record name", f"_{key}._{proto}.{zone_name}")
+        services.append({"name": key, "internal_port": port,
+                         "protocol": proto, "srv_name": srv})
+
+    src_block = (f'type     = "natpmp"\ngateway  = "{gateway}"\nlifetime = 120'
+                 if source_type == "natpmp" else
+                 'type    = "command"\nhost    = "203.0.113.1"   # or host_command\n'
+                 'command = "echo 25565"   # must print host:port or a port')
+
+    body = [f"# FyrWire — generated by `fyrwire setup`\n",
+            "# The token is read from $FYRWIRE_CF_TOKEN, so this file is safe to commit.\n\n",
+            f"[source]\n{src_block}\n\n",
+            '[provider]\ntype      = "cloudflare"\n'
+            'api_token = "env:FYRWIRE_CF_TOKEN"\n'
+            f'zone_id   = "{zone_id}"\n\n',
+            f'[node]\na_name = "{a_name}"\nttl    = 60\n\n']
+    for s in services:
+        body.append(f'[[service]]\nname          = "{s["name"]}"\n'
+                    f'internal_port = {s["internal_port"]}\n'
+                    f'protocol      = "{s["protocol"]}"\n'
+                    f'srv_name      = "{s["srv_name"]}"\n\n')
+    body.append("[agent]\ninterval = 45\n")
+
+    os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
+    with open(config_path, "w") as fh:
+        fh.write("".join(body))
+    _say()
+    _ok(f"wrote {config_path}")
+
+    if not os.environ.get("FYRWIRE_CF_TOKEN"):
+        _warn("export FYRWIRE_CF_TOKEN before running the agent:")
+        _say(f'    {DIM}export FYRWIRE_CF_TOKEN="…"{RESET}')
+
+    _say()
+    _say(f"{TEXT}Checking it works (publishes nothing)…{RESET}")
+    from .cli import build_plan, load_config
+    from . import sources
+    try:
+        cfg = load_config(config_path, resolve_secrets=False)
+        s = dict(cfg["source"])
+        src = sources.build(s.pop("type"), s)
+        plan = build_plan(cfg)
+        res = src.resolve(plan.requests())
+        _ok(f"address {res.host}")
+        for svc in plan.services:
+            port = res.ports.get(svc.key)
+            if port:
+                _ok(f"{svc.key}: {svc.internal_port} → {port}   {DIM}{svc.srv_name}{RESET}")
+            else:
+                _warn(f"{svc.key}: no mapping yet")
+    except Exception as e:
+        _warn(f"could not resolve yet: {e}")
+
+    _say()
+    _say(f"{TEXT}Next{RESET}")
+    _say(f"  {LABEL}fyrwire once{RESET}      {DIM}publish for real, once{RESET}")
+    _say(f"  {LABEL}fyrwire install{RESET}   {DIM}keep it running in the background{RESET}")
+    _say(f"  {LABEL}fyrwire ui{RESET}        {DIM}dashboard{RESET}")
+    return 0
+
+
+UNIT = """[Unit]
+Description=FyrWire — keep names pointed at a moving endpoint
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={exe} --config {config} run
+Restart=always
+RestartSec=10
+# The token must not live in the unit file: systemd unit files are
+# world-readable by default.
+EnvironmentFile=%h/.config/fyrwire/env
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def install(config_path: str) -> int:
+    if shutil.which("systemctl") is None:
+        _bad("systemd not found.")
+        _say(f"  {DIM}macOS: use launchd. Windows: Task Scheduler, or run "
+             f"`fyrwire run` under nssm.{RESET}")
+        return 1
+
+    unit_dir = os.path.expanduser("~/.config/systemd/user")
+    os.makedirs(unit_dir, exist_ok=True)
+    exe = shutil.which("fyrwire") or "python3 -m fyrwire"
+    path = os.path.join(unit_dir, "fyrwire.service")
+    with open(path, "w") as fh:
+        fh.write(UNIT.format(exe=exe, config=config_path))
+    _ok(f"wrote {path}")
+
+    env_path = os.path.expanduser("~/.config/fyrwire/env")
+    if not os.path.exists(env_path):
+        os.makedirs(os.path.dirname(env_path), exist_ok=True)
+        with open(env_path, "w") as fh:
+            fh.write("FYRWIRE_CF_TOKEN=\n")
+        os.chmod(env_path, 0o600)
+        _ok(f"wrote {env_path} (mode 600) — put your token in it")
+
+    _say()
+    _say(f"  {LABEL}systemctl --user daemon-reload{RESET}")
+    _say(f"  {LABEL}systemctl --user enable --now fyrwire{RESET}")
+    _say(f"  {LABEL}loginctl enable-linger $USER{RESET}   "
+         f"{DIM}so it runs without you logged in{RESET}")
+    return 0

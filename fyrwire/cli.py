@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from . import banner, providers, sources, tui
+from . import banner, providers, sources, tui, setup
 from .agent import Agent
 from .models import FyrWireError, NodePlanData, Service
 
@@ -133,6 +133,49 @@ def cmd_init(args) -> int:
     print(f"wrote {path}")
     print("set FYRWIRE_CF_TOKEN and FYRWIRE_CF_ZONE, then run: fyrwire once --dry-run")
     return 0
+
+
+def cmd_setup(args) -> int:
+    return setup.run(args.config, force=args.force)
+
+
+def cmd_install(args) -> int:
+    return setup.install(args.config)
+
+
+def cmd_doctor(args) -> int:
+    from . import detect
+    cfg = load_config(args.config, resolve_secrets=False)
+    plan = build_plan(cfg)
+    ok = True
+
+    src = cfg["source"]
+    if src.get("type") == "natpmp":
+        gw = src.get("gateway", "")
+        pub = detect.natpmp_probe(gw)
+        print(f"  gateway {gw:<16} " + (f"OK  public {pub}" if pub else "NO REPLY"))
+        ok &= bool(pub)
+
+    tok = os.environ.get("FYRWIRE_CF_TOKEN", "")
+    zone = cfg["provider"].get("zone_id", "")
+    if tok and zone:
+        good, why = detect.verify_token(tok)
+        print(f"  token                    " + ("OK" if good else f"BAD  {why}"))
+        ok &= good
+        if good:
+            can, why = detect.can_edit_zone(tok, zone)
+            print(f"  zone access              " + ("OK" if can else f"DENIED  {why}"))
+            ok &= can
+    else:
+        print("  token                    SKIPPED (FYRWIRE_CF_TOKEN unset)")
+
+    listening = {p for p, _ in detect.listening_ports()}
+    for svc in plan.services:
+        live = svc.internal_port in listening
+        print(f"  service {svc.key:<16} " +
+              (f"OK  :{svc.internal_port} listening" if live
+               else f"WARN :{svc.internal_port} nothing listening"))
+    return 0 if ok else 1
 
 
 def cmd_sources(args) -> int:
@@ -266,6 +309,12 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("init", help="write a starter config"); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_init)
+    p = sub.add_parser("setup", help="guided first-run setup")
+    p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_setup)
+    p = sub.add_parser("install", help="run it in the background (systemd user unit)")
+    p.set_defaults(fn=cmd_install)
+    p = sub.add_parser("doctor", help="check an existing setup, publish nothing")
+    p.set_defaults(fn=cmd_doctor)
     p = sub.add_parser("sources", help="list plug-ins"); p.set_defaults(fn=cmd_sources)
     p = sub.add_parser("once", help="one reconcile cycle")
     p.add_argument("--dry-run", action="store_true"); p.add_argument("--force", action="store_true")

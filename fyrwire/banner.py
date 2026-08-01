@@ -51,7 +51,7 @@ def render(text: str = "FyrWire", colour: bool | None = None, stream=None) -> st
 
 
 def tagline() -> str:
-    return "  keep a name pointed at a moving endpoint"
+    return "  Keep your connections... connected!"
 
 
 if __name__ == "__main__":

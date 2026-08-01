@@ -256,7 +256,7 @@ def _human(r: dict) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="fyrwire",
-                                 description="Keep a name pointed at a moving endpoint.")
+                                 description="Keep your connections... connected!")
     ap.add_argument("--config", default=DEFAULT_CONFIG)
     ap.add_argument("--state", default=DEFAULT_STATE)
     sub = ap.add_subparsers(dest="cmd", required=True)

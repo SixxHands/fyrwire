@@ -1,7 +1,7 @@
 [project]
 name = "fyrwire"
 version = "0.1.0"
-description = "Keep a name pointed at a moving endpoint (address AND port)."
+description = "Keep your connections... connected! Dynamic DNS for a moving address AND port."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []

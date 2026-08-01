@@ -147,25 +147,10 @@ class RelayManager:
 
 
 def tunnel_address(interface_hint: str | None = None) -> str | None:
-    import json
-    import subprocess
-    try:
-        out = subprocess.run(["ip", "-j", "-4", "addr", "show"],
-                             capture_output=True, text=True, timeout=5).stdout
-        links = json.loads(out or "[]")
-    except Exception:
-        return None
-    best = None
-    for link in links:
-        name = link.get("ifname", "")
-        if name == "lo":
-            continue
-        for a in link.get("addr_info", []):
-            ip, plen = a.get("local"), a.get("prefixlen")
-            if not ip:
-                continue
-            if interface_hint and name == interface_hint:
-                return ip
-            if plen == 32 or name.startswith(("wg", "tun", "proton")):
-                best = best or ip
-    return best
+    from . import hostinfo
+
+    if interface_hint:
+        for iface in hostinfo.backend().interfaces():
+            if iface.name == interface_hint:
+                return iface.address
+    return hostinfo.egress_address()

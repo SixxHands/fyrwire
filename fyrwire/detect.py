@@ -3,50 +3,33 @@ from __future__ import annotations
 import json
 import socket
 import struct
-import subprocess
 import urllib.error
 import urllib.request
 
+from . import hostinfo
+
 CF_API = "https://api.cloudflare.com/client/v4"
-
-
-def _ip_json(args: list[str]) -> list:
-    try:
-        out = subprocess.run(["ip", "-j", *args], capture_output=True, text=True,
-                             timeout=5).stdout
-        return json.loads(out or "[]")
-    except Exception:
-        return []
 
 
 def gateway_candidates() -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    for link in _ip_json(["-4", "addr", "show"]):
-        name = link.get("ifname", "")
-        if name == "lo":
-            continue
-        for a in link.get("addr_info", []):
-            ip = a.get("local")
-            if not ip:
-                continue
-            octets = ip.split(".")
-            if len(octets) != 4:
-                continue
-            guess = ".".join(octets[:3] + ["1"])
-            tunnelish = name.startswith(("wg", "tun", "proton", "tap")) or \
-                        a.get("prefixlen") == 32
-            if not tunnelish or guess in seen:
-                continue
-            seen.add(guess)
-            out.append((guess, f"{name} ({ip})"))
-
-    for r in _ip_json(["route", "show", "default"]):
-        gw = r.get("gateway")
-        if gw and gw not in seen:
+    egress = hostinfo.egress_address()
+    if egress:
+        gw = hostinfo.subnet_router(egress)
+        if gw:
             seen.add(gw)
-            out.append((gw, f"default route via {r.get('dev', '?')}"))
+            out.append((gw, f"route toward the internet ({egress})"))
+
+    for iface in hostinfo.backend().interfaces():
+        gw = hostinfo.subnet_router(iface.address)
+        if not gw or gw in seen:
+            continue
+        seen.add(gw)
+        entry = (gw, f"{iface.name} ({iface.address})")
+        out.insert(1 if iface.tunnelish else len(out), entry)
+
     return out
 
 
@@ -74,27 +57,7 @@ def find_gateway() -> tuple[str, str] | None:
 
 
 def listening_ports() -> list[tuple[int, str]]:
-    found: dict[int, str] = {}
-    try:
-        out = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True,
-                             timeout=5).stdout
-    except Exception:
-        return []
-    for line in out.splitlines()[1:]:
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        addr = parts[3]
-        port = addr.rsplit(":", 1)[-1]
-        if not port.isdigit() or int(port) <= 1024:
-            continue
-        proc = ""
-        if "users:" in line:
-            seg = line.split('users:', 1)[1]
-            if '"' in seg:
-                proc = seg.split('"')[1]
-        found.setdefault(int(port), proc)
-    return sorted(found.items())
+    return hostinfo.backend().listening_ports()
 
 
 def _cf(token: str, path: str, timeout: int = 10) -> dict:

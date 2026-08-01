@@ -397,6 +397,71 @@ class TestAlerting(Base):
         self.assertTrue(report["ok"], "a broken notifier must not fail the tick")
 
 
+class TestHostInfo(unittest.TestCase):
+
+    def test_local_address_toward_needs_no_subprocess(self):
+        import fyrwire.hostinfo as h
+        called = []
+        real = h.subprocess.run
+        h.subprocess.run = lambda *a, **k: called.append(a) or real(*a, **k)
+        try:
+            addr = h.local_address_toward("1.1.1.1")
+        finally:
+            h.subprocess.run = real
+        self.assertIsNotNone(addr, "routing lookup should always resolve")
+        self.assertEqual(called, [], "must not shell out for the routing answer")
+
+    def test_subnet_router(self):
+        from fyrwire.hostinfo import subnet_router
+        self.assertEqual(subnet_router("10.2.0.2"), "10.2.0.1")
+        self.assertEqual(subnet_router("192.168.4.77"), "192.168.4.1")
+        self.assertIsNone(subnet_router("not-an-address"))
+
+    def test_gateway_candidates_work_without_interface_enumeration(self):
+        from fyrwire import detect, hostinfo
+
+        class NoIfaces(hostinfo.IHostBackend):
+            name = "stub"
+            def listening_ports(self): return []
+            def interfaces(self): return []
+
+        real = hostinfo.backend
+        hostinfo.backend = lambda: NoIfaces()
+        try:
+            cands = detect.gateway_candidates()
+        finally:
+            hostinfo.backend = real
+        self.assertTrue(cands, "routing-table candidate must survive alone")
+        self.assertIn("route toward the internet", cands[0][1])
+
+    def test_unknown_platform_degrades_instead_of_crashing(self):
+        from fyrwire.hostinfo import FallbackBackend
+        b = FallbackBackend()
+        self.assertEqual(b.listening_ports(), [])
+        self.assertIn("manually", b.unsupported_reason())
+
+    def test_mac_and_windows_parsers_handle_real_output(self):
+        from fyrwire.hostinfo import MacBackend, WindowsBackend
+        import fyrwire.hostinfo as h
+
+        LSOF = ("COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n"
+                "java    52001 bob   45u  IPv6 0x1234      0t0  TCP *:25565 (LISTEN)\n"
+                "Plex     6013 bob   12u  IPv4 0x5678      0t0  TCP 127.0.0.1:32400 (LISTEN)\n")
+        NETSTAT = ("\nActive Connections\n\n"
+                   "  Proto  Local Address          Foreign Address        State           PID\n"
+                   "  TCP    0.0.0.0:25565          0.0.0.0:0              LISTENING       4321\n"
+                   "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       900\n")
+        real = h._run
+        try:
+            h._run = lambda cmd, timeout=6: LSOF
+            self.assertEqual(MacBackend().listening_ports(), [(25565, "java"), (32400, "Plex")])
+            h._run = lambda cmd, timeout=6: NETSTAT
+            self.assertEqual(WindowsBackend().listening_ports(), [(25565, "")],
+                             "port 135 is below 1024 and must be filtered")
+        finally:
+            h._run = real
+
+
 class TestPanels(unittest.TestCase):
     def test_geometry_is_exact(self):
         for width in (60, 80, 100, 132):

@@ -79,7 +79,11 @@ def build_agent(cfg: dict, state_path: str, log=print) -> Agent:
     p = dict(cfg["provider"])
     src = sources.build(s.pop("type"), s)
     prov = providers.build(p.pop("type"), p)
-    return Agent(src, prov, build_plan(cfg), state_path, log=log)
+    node = cfg.get("node", {})
+    return Agent(src, prov, build_plan(cfg), state_path, log=log,
+                 relay=bool(node.get("relay", False)),
+                 bind_host=node.get("bind_host"),
+                 target_host=node.get("target_host", "127.0.0.1"))
 
 
 STARTER = '''# FyrWire — keep names pointed at a moving endpoint.

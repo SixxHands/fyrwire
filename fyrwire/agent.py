@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 from .models import FyrWireError, NodePlanData, SrvRecordData
+from .relay import RelayManager, tunnel_address
 
 
 @dataclass
@@ -39,13 +40,18 @@ class AgentState:
 
 # Never wipe DNS on a bad cycle. A VPN blip should leave the last working port alone instead of taking everything down.
 class Agent:
-    def __init__(self, source, provider, plan: NodePlanData, state_path: str, log=print):
+    def __init__(self, source, provider, plan: NodePlanData, state_path: str, log=print,
+                 relay: bool = False, bind_host: str | None = None,
+                 target_host: str = "127.0.0.1"):
         self.source = source
         self.provider = provider
         self.plan = plan
         self.state_path = state_path
         self.state = AgentState.load(state_path)
         self.log = log
+        self.target_host = target_host
+        self.bind_host = bind_host
+        self.relays = RelayManager(log=log) if relay else None
 
     def tick(self, force: bool = False) -> dict:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -86,6 +92,20 @@ class Agent:
             if c:
                 changes.append(f"[{svc.key}] {c}")
             self.state.last_ports[svc.key] = port
+
+        if self.relays is not None:
+            bind = self.bind_host or tunnel_address()
+            if not bind:
+                self.log("relay: no tunnel address found; skipping")
+            else:
+                wanted = {}
+                for svc in self.plan.services:
+                    port = res.ports.get(svc.key)
+                    if port is None or svc.protocol.lower() != "tcp":
+                        continue
+                    wanted[svc.key] = (bind, port, self.target_host, svc.internal_port)
+                for c in self.relays.sync(wanted):
+                    changes.append(c)
 
         if changes:
             self.state.total_publishes += 1

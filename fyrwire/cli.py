@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from . import banner, providers, sources
+from . import banner, providers, sources, tui
 from .agent import Agent
 from .models import FyrWireError, NodePlanData, Service
 
@@ -203,6 +203,49 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_ui(args) -> int:
+    from .agent import AgentState
+
+    cfg = load_config(args.config, resolve_secrets=False)
+    plan = build_plan(cfg)
+    st = AgentState.load(args.state)
+    src_name = cfg["source"].get("type", "?")
+    prov_name = cfg["provider"].get("type", "?")
+
+    def frame() -> str:
+        last = None
+        state = st
+        if args.probe:
+            s2 = dict(cfg["source"])
+            src = sources.build(s2.pop("type"), s2)
+            try:
+                res = src.resolve(plan.requests())
+                state = AgentState(**{**vars(st)})
+                state.last_host = res.host
+                state.last_ports = {**st.last_ports, **res.ports}
+                last = {"skipped": sorted(res.partial)}
+            except FyrWireError as e:
+                last = {"skipped": [s.key for s in plan.services]}
+                state = AgentState(**{**vars(st)})
+                state.consecutive_failures = max(1, st.consecutive_failures)
+                print(f"probe failed: {e}", file=sys.stderr)
+        return tui.dashboard(plan, state, src_name, prov_name, last, args.width)
+
+    if not args.watch:
+        print(frame())
+        return 0
+
+    import time
+    try:
+        while True:
+            sys.stdout.write("\033[2J\033[H" + frame() + "\n")
+            sys.stdout.flush()
+            time.sleep(args.watch)
+    except KeyboardInterrupt:
+        sys.stdout.write("\033[?25h\n")
+    return 0
+
+
 def _human(r: dict) -> str:
     if not r.get("ok"):
         return f"FAILED  {r.get('error')}\n        kept {r.get('kept') or 'nothing'} in DNS"
@@ -226,6 +269,12 @@ def main(argv=None) -> int:
     p = sub.add_parser("run", help="loop forever")
     p.add_argument("--interval", type=int); p.add_argument("--cycles", type=int)
     p.add_argument("--quiet", action="store_true"); p.set_defaults(fn=cmd_run)
+    p = sub.add_parser("ui", help="dashboard")
+    p.add_argument("--probe", action="store_true",
+                   help="ask the gateway for current ports (no DNS credentials needed)")
+    p.add_argument("--watch", type=float, metavar="SECS", help="redraw every SECS")
+    p.add_argument("--width", type=int, default=0)
+    p.set_defaults(fn=cmd_ui)
     p = sub.add_parser("status", help="what the agent last did")
     p.add_argument("--json", action="store_true"); p.set_defaults(fn=cmd_status)
 

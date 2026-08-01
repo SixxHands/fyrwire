@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-from .models import FyrWireError, NodePlanData, SrvRecordData
+from .models import FyrWireError, HttpsRecordData, NodePlanData, SrvRecordData
 from .relay import RelayManager, tunnel_address
 
 
@@ -91,10 +91,19 @@ class Agent:
             prev = self.state.last_ports.get(svc.key)
             if not force and prev == port:
                 continue
-            rec = SrvRecordData(name=svc.srv_name, target=self.plan.a_name, port=port,
-                            priority=svc.priority, weight=svc.weight,
-                            ttl=svc.ttl or self.plan.ttl)
-            c = self.provider.ensure_srv(rec)
+            kind = getattr(svc, "record", "srv")
+            if kind == "none":
+                self.state.last_ports[svc.key] = port
+                continue
+            if kind == "https":
+                c = self.provider.ensure_https(HttpsRecordData(
+                    name=svc.srv_name, target=self.plan.a_name, port=port,
+                    ttl=svc.ttl or self.plan.ttl))
+            else:
+                c = self.provider.ensure_srv(SrvRecordData(
+                    name=svc.srv_name, target=self.plan.a_name, port=port,
+                    priority=svc.priority, weight=svc.weight,
+                    ttl=svc.ttl or self.plan.ttl))
             if c:
                 changes.append(f"[{svc.key}] {c}")
             self.state.last_ports[svc.key] = port

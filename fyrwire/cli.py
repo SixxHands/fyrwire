@@ -61,6 +61,12 @@ def build_plan(cfg: dict) -> NodePlanData:
         for req in ("internal_port", "srv_name"):
             if req not in s:
                 raise FyrWireError(f"service {key!r} is missing {req}")
+        pre = None
+        if s.get("preset"):
+            from . import presets as _p
+            pre = _p.get(s["preset"])
+            if pre is None:
+                raise FyrWireError(f"unknown preset {s['preset']!r}")
         svcs.append(Service(
             key=key,
             internal_port=int(s["internal_port"]),
@@ -69,6 +75,7 @@ def build_plan(cfg: dict) -> NodePlanData:
             priority=int(s.get("priority", 0)),
             weight=int(s.get("weight", 5)),
             ttl=int(s["ttl"]) if "ttl" in s else None,
+            record=s.get("record", pre.record if pre else "srv"),
         ))
     return NodePlanData(a_name=node["a_name"], services=tuple(svcs),
                     ttl=int(node.get("ttl", 60)))
@@ -241,6 +248,25 @@ def cmd_sources(args) -> int:
     return 0
 
 
+def cmd_presets(args) -> int:
+    from . import presets
+    from .tui import BAD, DIM, LABEL, OK, RESET, TEXT, WARN
+
+    colour = {"srv": OK, "https": WARN, "manual": BAD}
+    print(f"  {DIM}{'preset':<18}{'port':>6}  {'proto':<6}{'record':<7}"
+          f"client follows the port?{RESET}")
+    for p in presets.listing():
+        port = str(p.port) if p.port else "—"
+        print(f"  {LABEL}{p.key:<18}{RESET}{TEXT}{port:>6}{RESET}  "
+              f"{DIM}{p.protocol:<6}{p.record:<7}{RESET}"
+              f"{colour[p.follows]}{p.follows}{RESET}")
+    print()
+    for k, v in presets.FOLLOWS_HELP.items():
+        print(f"  {colour[k]}{k:<8}{RESET}{DIM}{v}{RESET}")
+    print(f"\n  {DIM}Use in a service block:  preset = \"web\"{RESET}")
+    return 0
+
+
 def cmd_once(args) -> int:
     cfg = load_config(args.config, resolve_secrets=not args.dry_run)
     if args.dry_run:
@@ -385,6 +411,8 @@ def main(argv=None) -> int:
     p.add_argument("--timeout", type=float, default=6.0)
     p.set_defaults(fn=cmd_check)
     p = sub.add_parser("sources", help="list plug-ins"); p.set_defaults(fn=cmd_sources)
+    p = sub.add_parser("presets", help="service presets, and what each client follows")
+    p.set_defaults(fn=cmd_presets)
     p = sub.add_parser("once", help="one reconcile cycle")
     p.add_argument("--dry-run", action="store_true"); p.add_argument("--force", action="store_true")
     p.add_argument("--json", action="store_true"); p.set_defaults(fn=cmd_once)

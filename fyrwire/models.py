@@ -43,6 +43,7 @@ class Service:
     priority: int = 0
     weight: int = 5
     ttl: int | None = None
+    record: str = "srv"
 
     def request(self) -> PortRequestData:
         return PortRequestData(self.key, self.internal_port, self.protocol)
@@ -63,6 +64,20 @@ class NodePlanData:
             if s.key == key:
                 return s
         raise KeyError(key)
+
+
+@dataclass(frozen=True)
+class HttpsRecordData:
+
+    name: str
+    target: str
+    port: int
+    priority: int = 1
+    ttl: int = 60
+
+    @property
+    def value(self) -> str:
+        return f"{self.priority} {self.target} port={self.port}"
 
 
 @dataclass(frozen=True)

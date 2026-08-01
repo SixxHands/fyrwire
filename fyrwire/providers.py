@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 
-from .models import FyrWireError, SrvRecordData
+from .models import FyrWireError, HttpsRecordData, SrvRecordData
 
 _REGISTRY: dict[str, type["DnsProvider"]] = {}
 
@@ -41,6 +41,10 @@ class IDnsProvider(ABC):
 
     @abstractmethod
     def ensure_srv(self, rec: SrvRecordData) -> str | None:
+        pass
+
+    @abstractmethod
+    def ensure_https(self, rec: HttpsRecordData) -> str | None:
         pass
 
     @abstractmethod
@@ -104,7 +108,7 @@ class CloudflareProvider(IDnsProvider):
                 self._ids[key] = rid
 
         body: dict = {"type": rtype, "name": name, "ttl": ttl, "comment": comment}
-        if rtype == "SRV":
+        if rtype in ("SRV", "HTTPS"):
             body["data"] = content
         else:
             body["content"] = content
@@ -123,6 +127,11 @@ class CloudflareProvider(IDnsProvider):
     def _matches(rtype: str, existing: dict, content, ttl: int) -> bool:
         if existing.get("ttl") != ttl:
             return False
+        if rtype == "HTTPS":
+            d = existing.get("data") or {}
+            return (str(d.get("target", "")).rstrip(".") == str(content["target"]).rstrip(".")
+                    and int(d.get("priority", -1)) == int(content["priority"])
+                    and str(d.get("value", "")) == str(content["value"]))
         if rtype == "SRV":
             d = existing.get("data") or {}
             return (int(d.get("port", -1)) == int(content["port"])
@@ -143,6 +152,14 @@ class CloudflareProvider(IDnsProvider):
             "weight": rec.weight,
             "port": rec.port,
             "target": rec.target,
+        }, rec.ttl, self.TAG)
+        return f"{what} -> {rec.value}" if what else None
+
+    def ensure_https(self, rec: HttpsRecordData) -> str | None:
+        what = self._upsert("HTTPS", rec.name, {
+            "priority": rec.priority,
+            "target": rec.target,
+            "value": f"port={rec.port}",
         }, rec.ttl, self.TAG)
         return f"{what} -> {rec.value}" if what else None
 

@@ -186,6 +186,11 @@ def cmd_add(args) -> int:
     return setup.add_service(args.config)
 
 
+def cmd_remove(args) -> int:
+    return setup.remove_service(args.config, args.name, keep_dns=args.keep_dns,
+                                 state_path=args.state, yes=args.yes)
+
+
 def cmd_check(args) -> int:
     from . import dns
     cfg = load_config(args.config, resolve_secrets=False)
@@ -366,6 +371,12 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_install)
     p = sub.add_parser("add", help="add a service to an existing config")
     p.set_defaults(fn=cmd_add)
+    p = sub.add_parser("remove", help="remove a service and its DNS record")
+    p.add_argument("name")
+    p.add_argument("--keep-dns", action="store_true",
+                   help="remove locally only, leave the record in place")
+    p.add_argument("--yes", action="store_true", help="do not prompt")
+    p.set_defaults(fn=cmd_remove)
     p = sub.add_parser("doctor", help="check an existing setup, publish nothing")
     p.set_defaults(fn=cmd_doctor)
     p = sub.add_parser("check", help="verify from outside: resolve, then connect")

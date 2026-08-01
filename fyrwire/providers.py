@@ -43,6 +43,10 @@ class IDnsProvider(ABC):
     def ensure_srv(self, rec: SrvRecordData) -> str | None:
         pass
 
+    @abstractmethod
+    def delete(self, rtype: str, name: str) -> str | None:
+        pass
+
 
 @register("cloudflare")
 # Every record we write gets stamped with our tag. Remove refuses to touch records without it so we never nuke your real DNS.
@@ -141,3 +145,16 @@ class CloudflareProvider(IDnsProvider):
             "target": rec.target,
         }, rec.ttl, self.TAG)
         return f"{what} -> {rec.value}" if what else None
+
+    def delete(self, rtype: str, name: str) -> str | None:
+        rid, existing = self._find(rtype, name)
+        if not rid:
+            return None
+        comment = (existing or {}).get("comment") or ""
+        if self.TAG not in comment:
+            raise FyrWireError(
+                f"{rtype} {name} is not tagged '{self.TAG}' — refusing to delete "
+                f"a record FyrWire did not create")
+        self._call("DELETE", f"/zones/{self.zone}/dns_records/{rid}")
+        self._ids.pop((rtype, name), None)
+        return f"deleted {rtype} {name}"

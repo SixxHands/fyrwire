@@ -255,6 +255,81 @@ def add_service(config_path: str) -> int:
     return 0
 
 
+def remove_service(config_path: str, name: str, keep_dns: bool = False,
+                   state_path: str | None = None, yes: bool = False) -> int:
+    from .cli import build_agent, build_plan, load_config
+
+    if not os.path.exists(config_path):
+        _bad(f"no config at {config_path}")
+        return 1
+    cfg = load_config(config_path, resolve_secrets=False)
+    plan = build_plan(cfg)
+    try:
+        svc = plan.service(name)
+    except KeyError:
+        _bad(f"no service called {name!r}")
+        _say(f"  {DIM}have: {', '.join(s.key for s in plan.services)}{RESET}")
+        return 1
+
+    _say(f"  {DIM}{svc.key}: {svc.protocol}/{svc.internal_port} -> {svc.srv_name}{RESET}")
+    if not keep_dns:
+        _say(f"  {WARN}!{RESET} this will DELETE the DNS record {svc.srv_name}")
+    if not yes and not _yes("Remove it?", False):
+        return 1
+
+    if not keep_dns:
+        try:
+            cfg_full = load_config(config_path)
+            agent = build_agent(cfg_full, state_path or "/dev/null",
+                                log=lambda *_: None)
+            what = agent.provider.delete("SRV", svc.srv_name)
+            _ok(what or f"{svc.srv_name} was already absent")
+        except Exception as e:
+            _bad(f"could not delete the DNS record: {e}")
+            _say(f"    {DIM}config left untouched. Fix the above, or re-run with"
+                 f" --keep-dns to remove it locally only.{RESET}")
+            return 1
+
+    with open(config_path) as fh:
+        text = fh.read()
+    blocks, current = [], []
+    for line in text.splitlines(keepends=True):
+        if line.strip() == "[[service]]":
+            blocks.append(current)
+            current = [line]
+        elif line.strip().startswith("[") and current and current[0].strip() == "[[service]]":
+            blocks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    blocks.append(current)
+    kept = [b for b in blocks
+            if not (b and b[0].strip() == "[[service]]"
+                    and any(f'"{svc.key}"' in l and "name" in l for l in b))]
+    with open(config_path, "w") as fh:
+        fh.write("".join("".join(b) for b in kept))
+
+    try:
+        left = build_plan(load_config(config_path, resolve_secrets=False))
+    except Exception as e:
+        _bad(f"config no longer parses after removal: {e}")
+        return 1
+    if svc.key in {s.key for s in left.services}:
+        _bad("service still present after rewrite — config not in the expected shape")
+        return 1
+    _ok(f"removed {svc.key} from {config_path}")
+
+    if state_path and os.path.exists(state_path):
+        from .agent import AgentState
+        st = AgentState.load(state_path)
+        if st.last_ports.pop(svc.key, None) is not None:
+            st.save(state_path)
+            _ok("cleared its stored port")
+
+    _say(f"\n  {DIM}the relay for it stops on the next reconcile{RESET}")
+    return 0
+
+
 UNIT = """[Unit]
 Description=FyrWire — keep names pointed at a moving endpoint
 After=network-online.target

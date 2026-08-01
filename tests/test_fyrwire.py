@@ -243,6 +243,100 @@ class TestIntegration(Base):
                          "UDP needs session tracking, not a TCP listener")
 
 
+class TestRemove(unittest.TestCase):
+
+    def _provider(self, existing_comment):
+        from fyrwire.providers import CloudflareProvider
+
+        class Fake(CloudflareProvider):
+            def __init__(self):
+                self.token, self.zone, self.timeout = "t", "z", 5
+                self._ids = {}
+                self.deleted = []
+
+            def _find(self, rtype, name):
+                return "rec123", {"id": "rec123", "comment": existing_comment}
+
+            def _call(self, method, path, body=None):
+                if method == "DELETE":
+                    self.deleted.append(path)
+                return {"success": True, "result": {}}
+
+        return Fake()
+
+    def test_deletes_a_record_it_owns(self):
+        p = self._provider("managed by fyrwire")
+        self.assertIn("deleted", p.delete("SRV", "_mc._tcp.example.com"))
+        self.assertEqual(len(p.deleted), 1)
+
+    def test_refuses_to_delete_a_record_it_does_not_own(self):
+        p = self._provider("hand-made, do not touch")
+        with self.assertRaises(FyrWireError):
+            p.delete("SRV", "_mc._tcp.example.com")
+        self.assertEqual(p.deleted, [], "must not delete an untagged record")
+
+    def test_absent_record_is_not_an_error(self):
+        from fyrwire.providers import CloudflareProvider
+
+        class Fake(CloudflareProvider):
+            def __init__(self):
+                self.token, self.zone, self.timeout = "t", "z", 5
+                self._ids = {}
+
+            def _find(self, rtype, name):
+                return None, None
+
+        self.assertIsNone(Fake().delete("SRV", "_gone._tcp.example.com"))
+
+
+class TestConfigEdit(unittest.TestCase):
+    CONFIG = '''[source]
+type = "static"
+host = "1.2.3.4"
+
+[provider]
+type = "cloudflare"
+api_token = "x"
+zone_id = "z"
+
+[node]
+a_name = "node.example.com"
+
+[[service]]
+name          = "minecraft"
+internal_port = 25565
+srv_name      = "_minecraft._tcp.example.com"
+
+[[service]]
+name          = "valheim"
+internal_port = 2456
+srv_name      = "_valheim._udp.example.com"
+'''
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "fyrwire.toml")
+        with open(self.path, "w") as fh:
+            fh.write(self.CONFIG)
+
+    def test_removing_one_leaves_the_other_intact(self):
+        from fyrwire.cli import build_plan, load_config
+        from fyrwire.setup import remove_service
+
+        rc = remove_service(self.path, "valheim", keep_dns=True, yes=True)
+        self.assertEqual(rc, 0)
+        left = build_plan(load_config(self.path, resolve_secrets=False))
+        self.assertEqual([s.key for s in left.services], ["minecraft"])
+        self.assertEqual(left.services[0].internal_port, 25565,
+                         "the surviving service must be untouched")
+
+    def test_unknown_service_is_rejected(self):
+        from fyrwire.setup import remove_service
+        self.assertEqual(remove_service(self.path, "nope", keep_dns=True, yes=True), 1)
+        with open(self.path) as fh:
+            self.assertIn("valheim", fh.read(), "config must not be modified")
+
+
 class TestPanels(unittest.TestCase):
     def test_geometry_is_exact(self):
         for width in (60, 80, 100, 132):

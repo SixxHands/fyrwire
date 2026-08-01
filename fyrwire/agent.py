@@ -6,17 +6,17 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
-from .models import Endpoint, FyrWireError, Publication
+from .models import FyrWireError, NodePlanData, SrvRecordData
 
 
 @dataclass
 class AgentState:
-    last_endpoint: str | None = None
-    last_published: str | None = None
+    last_host: str | None = None
+    last_ports: dict = field(default_factory=dict)
     consecutive_failures: int = 0
     total_publishes: int = 0
     total_failures: int = 0
-    history: list[dict] = field(default_factory=list)
+    history: list = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -39,7 +39,7 @@ class AgentState:
 
 # Never wipe DNS on a bad cycle. A VPN blip should leave the last working port alone instead of taking everything down.
 class Agent:
-    def __init__(self, source, provider, plan, state_path, log=print):
+    def __init__(self, source, provider, plan: NodePlanData, state_path: str, log=print):
         self.source = source
         self.provider = provider
         self.plan = plan
@@ -47,50 +47,59 @@ class Agent:
         self.state = AgentState.load(state_path)
         self.log = log
 
-    def _publication(self, ep: Endpoint) -> Publication:
-        return Publication(
-            a_name=self.plan["a_name"],
-            srv_name=self.plan["srv_name"],
-            endpoint=ep,
-            ttl=int(self.plan.get("ttl", 60)),
-            srv_priority=int(self.plan.get("srv_priority", 0)),
-            srv_weight=int(self.plan.get("srv_weight", 5)),
-        )
-
     def tick(self, force: bool = False) -> dict:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            ep = self.source.discover()
+            res = self.source.resolve(self.plan.requests())
         except FyrWireError as e:
             self.state.consecutive_failures += 1
             self.state.total_failures += 1
             self.state.save(self.state_path)
-            self.log(f"discover failed ({self.state.consecutive_failures}x): {e}")
+            self.log(f"resolve failed ({self.state.consecutive_failures}x): {e}")
             return {"ok": False, "at": stamp, "error": str(e),
-                    "kept": self.state.last_published}
+                    "kept": {"host": self.state.last_host, "ports": dict(self.state.last_ports)}}
 
         if self.state.consecutive_failures:
             self.log(f"recovered after {self.state.consecutive_failures} failure(s)")
         self.state.consecutive_failures = 0
 
-        changed = (str(ep) != self.state.last_endpoint)
-        if not changed and not force:
-            self.state.last_endpoint = str(ep)
-            self.state.save(self.state_path)
-            return {"ok": True, "at": stamp, "endpoint": str(ep), "changes": []}
+        changes: list[str] = []
+        skipped = sorted(res.partial)
 
-        pub = self._publication(ep)
-        changes = self.provider.publish(pub)
-        self.state.last_endpoint = str(ep)
+        if force or res.host != self.state.last_host:
+            c = self.provider.ensure_a(self.plan.a_name, res.host, self.plan.ttl)
+            if c:
+                changes.append(c)
+            self.state.last_host = res.host
+
+        for svc in self.plan.services:
+            port = res.ports.get(svc.key)
+            if port is None:
+                continue
+            prev = self.state.last_ports.get(svc.key)
+            if not force and prev == port:
+                continue
+            rec = SrvRecordData(name=svc.srv_name, target=self.plan.a_name, port=port,
+                            priority=svc.priority, weight=svc.weight,
+                            ttl=svc.ttl or self.plan.ttl)
+            c = self.provider.ensure_srv(rec)
+            if c:
+                changes.append(f"[{svc.key}] {c}")
+            self.state.last_ports[svc.key] = port
+
         if changes:
-            self.state.last_published = str(ep)
             self.state.total_publishes += 1
-            self.state.history = ([{"at": stamp, "endpoint": str(ep), "changes": changes}]
+            self.state.history = ([{"at": stamp, "host": res.host,
+                                    "ports": dict(res.ports), "changes": changes}]
                                   + self.state.history)[:20]
             for c in changes:
                 self.log(c)
+        if skipped:
+            self.log(f"unresolved this cycle (records left alone): {', '.join(skipped)}")
+
         self.state.save(self.state_path)
-        return {"ok": True, "at": stamp, "endpoint": str(ep), "changes": changes}
+        return {"ok": True, "at": stamp, "host": res.host, "ports": dict(res.ports),
+                "changes": changes, "skipped": skipped}
 
     def run(self, interval: int, max_cycles: int | None = None) -> None:
         n = 0

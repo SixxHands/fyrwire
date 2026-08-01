@@ -7,7 +7,7 @@ import sys
 
 from . import banner, providers, sources
 from .agent import Agent
-from .models import FyrWireError
+from .models import FyrWireError, NodePlanData, Service
 
 try:
     import tomllib
@@ -30,9 +30,11 @@ def load_config(path: str, resolve_secrets: bool = True) -> dict:
         raise FyrWireError(f"no config at {path} — run `fyrwire init` to write a starter")
     with open(path, "rb") as fh:
         cfg = tomllib.load(fh)
-    for key in ("source", "provider", "record"):
+    for key in ("source", "provider", "node"):
         if key not in cfg:
             raise FyrWireError(f"config is missing the [{key}] section")
+    if not cfg.get("service"):
+        raise FyrWireError("config defines no [[service]] entries")
     if not resolve_secrets:
         return cfg
     prov = dict(cfg["provider"])
@@ -47,36 +49,73 @@ def load_config(path: str, resolve_secrets: bool = True) -> dict:
     return cfg
 
 
+def build_plan(cfg: dict) -> NodePlanData:
+    node = cfg["node"]
+    svcs = []
+    seen = set()
+    for i, s in enumerate(cfg["service"]):
+        key = s.get("name") or f"svc{i}"
+        if key in seen:
+            raise FyrWireError(f"duplicate service name {key!r}")
+        seen.add(key)
+        for req in ("internal_port", "srv_name"):
+            if req not in s:
+                raise FyrWireError(f"service {key!r} is missing {req}")
+        svcs.append(Service(
+            key=key,
+            internal_port=int(s["internal_port"]),
+            srv_name=s["srv_name"],
+            protocol=s.get("protocol", "tcp"),
+            priority=int(s.get("priority", 0)),
+            weight=int(s.get("weight", 5)),
+            ttl=int(s["ttl"]) if "ttl" in s else None,
+        ))
+    return NodePlanData(a_name=node["a_name"], services=tuple(svcs),
+                    ttl=int(node.get("ttl", 60)))
+
+
 def build_agent(cfg: dict, state_path: str, log=print) -> Agent:
     s = dict(cfg["source"])
     p = dict(cfg["provider"])
     src = sources.build(s.pop("type"), s)
     prov = providers.build(p.pop("type"), p)
-    return Agent(src, prov, cfg["record"], state_path, log=log)
+    return Agent(src, prov, build_plan(cfg), state_path, log=log)
 
 
-STARTER = '''# FyrWire — keep a name pointed at a moving endpoint.
+STARTER = '''# FyrWire — keep names pointed at a moving endpoint.
 #
 # Secrets: any value written as "env:NAME" is read from that environment
 # variable instead, so this file stays safe to commit.
 
 [source]
 # natpmp | upnp | command | static
-type          = "natpmp"
-gateway       = "10.2.0.1"     # VPN gateway that grants the forward
-internal_port = 25565          # the local port the service listens on
-lifetime      = 120
+type     = "natpmp"
+gateway  = "10.2.0.1"          # VPN gateway that grants the forwards
+lifetime = 120
 
 [provider]
 type      = "cloudflare"
 api_token = "env:FYRWIRE_CF_TOKEN"
 zone_id   = "env:FYRWIRE_CF_ZONE"
 
-[record]
-# A record carries the ADDRESS, SRV carries the PORT. Both move together.
-a_name   = "node.example.com"
-srv_name = "_minecraft._tcp.play.example.com"
-ttl      = 60
+[node]
+# ONE A record for the machine. Every service points its SRV at this name, so
+# the address is published once and cannot disagree with itself.
+a_name = "node.example.com"
+ttl    = 60
+
+# One [[service]] per thing you expose. Each gets its own forwarded port and
+# its own SRV record; they share the A record above.
+[[service]]
+name          = "minecraft"
+internal_port = 25565
+srv_name      = "_minecraft._tcp.play.example.com"
+
+[[service]]
+name          = "valheim"
+internal_port = 2456
+protocol      = "udp"
+srv_name      = "_valheim._udp.vh.example.com"
 
 [agent]
 interval = 45
@@ -107,11 +146,17 @@ def cmd_once(args) -> int:
     if args.dry_run:
         s = dict(cfg["source"])
         src = sources.build(s.pop("type"), s)
-        ep = src.discover()
-        rec = cfg["record"]
-        print(f"discovered  {ep}")
-        print(f"would set   A   {rec['a_name']} -> {ep.host}")
-        print(f"would set   SRV {rec['srv_name']} -> 0 5 {ep.port} {rec['a_name']}")
+        plan = build_plan(cfg)
+        res = src.resolve(plan.requests())
+        print(f"address     {res.host}")
+        print(f"would set   A   {plan.a_name} -> {res.host}")
+        for svc in plan.services:
+            port = res.ports.get(svc.key)
+            if port is None:
+                print(f"  [{svc.key}] UNRESOLVED — its record would be left alone")
+                continue
+            print(f"would set   SRV {svc.srv_name} -> "
+                  f"{svc.priority} {svc.weight} {port} {plan.a_name}")
         return 0
     agent = build_agent(cfg, args.state)
     report = agent.tick(force=args.force)
@@ -142,8 +187,12 @@ def cmd_status(args) -> int:
         return 0
     print(banner.render())
     print(banner.tagline() + "\n")
-    print(f"  last endpoint    {st.last_endpoint or '—'}")
-    print(f"  last published   {st.last_published or '—'}")
+    print(f"  address          {st.last_host or '—'}")
+    if st.last_ports:
+        for k in sorted(st.last_ports):
+            print(f"    {k:<14} :{st.last_ports[k]}")
+    else:
+        print("    (no services published yet)")
     print(f"  publishes        {st.total_publishes}")
     print(f"  failures         {st.total_failures} "
           f"({st.consecutive_failures} consecutive)")

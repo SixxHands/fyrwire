@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 
-from .models import FyrWireError, Publication
+from .models import FyrWireError, SrvRecordData
 
 _REGISTRY: dict[str, type["DnsProvider"]] = {}
 
@@ -36,7 +36,11 @@ class IDnsProvider(ABC):
     name: str = "?"
 
     @abstractmethod
-    def publish(self, pub: Publication) -> list[str]:
+    def ensure_a(self, name: str, ip: str, ttl: int) -> str | None:
+        pass
+
+    @abstractmethod
+    def ensure_srv(self, rec: SrvRecordData) -> str | None:
         pass
 
 
@@ -123,21 +127,17 @@ class CloudflareProvider(IDnsProvider):
                     and int(d.get("weight", -1)) == int(content["weight"]))
         return str(existing.get("content", "")) == str(content)
 
-    def publish(self, pub: Publication) -> list[str]:
-        tag = "managed by fyrwire"
-        changes = []
+    TAG = "managed by fyrwire"
 
-        a = self._upsert("A", pub.a_name, pub.endpoint.host, pub.ttl, tag)
-        if a:
-            changes.append(f"{a} -> {pub.endpoint.host}")
+    def ensure_a(self, name: str, ip: str, ttl: int) -> str | None:
+        what = self._upsert("A", name, ip, ttl, self.TAG)
+        return f"{what} -> {ip}" if what else None
 
-        srv = self._upsert("SRV", pub.srv_name, {
-            "priority": pub.srv_priority,
-            "weight": pub.srv_weight,
-            "port": pub.endpoint.port,
-            "target": pub.a_name,
-        }, pub.ttl, tag)
-        if srv:
-            changes.append(f"{srv} -> {pub.srv_value}")
-
-        return changes
+    def ensure_srv(self, rec: SrvRecordData) -> str | None:
+        what = self._upsert("SRV", rec.name, {
+            "priority": rec.priority,
+            "weight": rec.weight,
+            "port": rec.port,
+            "target": rec.target,
+        }, rec.ttl, self.TAG)
+        return f"{what} -> {rec.value}" if what else None

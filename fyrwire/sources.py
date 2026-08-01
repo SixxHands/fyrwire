@@ -8,7 +8,7 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 
-from .models import Endpoint, FyrWireError
+from .models import FyrWireError, PortRequestData, EndpointData
 
 _REGISTRY: dict[str, type["EndpointSource"]] = {}
 
@@ -39,58 +39,86 @@ class IPortSource(ABC):
     name: str = "?"
 
     @abstractmethod
-    def discover(self) -> Endpoint:
+    def resolve(self, requests: list[PortRequestData]) -> EndpointData:
         pass
 
 
 @register("static")
 class StaticSource(IPortSource):
-    def __init__(self, host: str, port: int):
-        self.host, self.port = host, int(port)
 
-    def discover(self) -> Endpoint:
-        return Endpoint(self.host, self.port)
+    def __init__(self, host: str, ports: dict | None = None):
+        self.host = host
+        self.ports = {str(k): int(v) for k, v in (ports or {}).items()}
+
+    def resolve(self, requests: list[PortRequestData]) -> EndpointData:
+        got = {r.key: self.ports.get(r.key, r.internal_port) for r in requests}
+        return EndpointData(self.host, got)
 
 
 @register("command")
 class CommandSource(IPortSource):
 
-    def __init__(self, command: str, host: str | None = None, timeout: int = 20):
-        self.command, self.host, self.timeout = command, host, int(timeout)
+    def __init__(self, command: str, host: str | None = None, host_command: str | None = None,
+                 timeout: int = 20):
+        self.command, self.host, self.host_command = command, host, host_command
+        self.timeout = int(timeout)
 
-    def discover(self) -> Endpoint:
+    def _run(self, cmd: str) -> str:
         try:
-            r = subprocess.run(self.command, shell=True, capture_output=True,
-                               text=True, timeout=self.timeout)
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                               timeout=self.timeout)
         except subprocess.TimeoutExpired:
-            raise FyrWireError(f"source command timed out after {self.timeout}s") from None
+            raise FyrWireError(f"command timed out after {self.timeout}s: {cmd}") from None
         if r.returncode != 0:
-            raise FyrWireError(f"source command failed ({r.returncode}): {r.stderr.strip()[:200]}")
-        out = r.stdout.strip()
-        m = re.search(r"([A-Za-z0-9_.:-]+):(\d{1,5})\b", out)
-        if m:
-            return Endpoint(m.group(1), int(m.group(2)))
-        m = re.search(r"\b(\d{1,5})\b", out)
-        if m and self.host:
-            return Endpoint(self.host, int(m.group(1)))
-        raise FyrWireError(f"could not parse host:port from source output: {out[:120]!r}")
+            raise FyrWireError(f"command failed ({r.returncode}): {r.stderr.strip()[:160]}")
+        return r.stdout.strip()
+
+    def resolve(self, requests: list[PortRequestData]) -> EndpointData:
+        host = self.host
+        if self.host_command:
+            host = self._run(self.host_command).split()[0]
+
+        ports: dict[str, int] = {}
+        partial: set[str] = set()
+        for req in requests:
+            cmd = self.command.format(key=req.key, internal_port=req.internal_port,
+                                      protocol=req.protocol)
+            try:
+                out = self._run(cmd)
+            except FyrWireError:
+                partial.add(req.key)
+                continue
+            m = re.search(r"([A-Za-z0-9_.:-]+):(\d{1,5})\b", out)
+            if m:
+                host = host or m.group(1)
+                ports[req.key] = int(m.group(2))
+                continue
+            m = re.search(r"\b(\d{1,5})\b", out)
+            if m:
+                ports[req.key] = int(m.group(1))
+            else:
+                partial.add(req.key)
+
+        if not host:
+            raise FyrWireError("command source produced no host (set host or host_command)")
+        if not ports:
+            raise FyrWireError("command source produced no ports")
+        return EndpointData(host, ports, partial)
 
 
 @register("natpmp")
 # RFC 6886 NAT-PMP speaks raw UDP on port 5351. Twelve bytes out, sixteen bytes back, no XML in sight.
 class NatPmpSource(IPortSource):
 
-    def __init__(self, gateway: str, internal_port: int, lifetime: int = 120,
-                 protocol: str = "tcp", timeout: float = 3.0, retries: int = 3):
+    def __init__(self, gateway: str, lifetime: int = 120, timeout: float = 3.0,
+                 retries: int = 3):
         self.gateway = gateway
-        self.internal_port = int(internal_port)
         self.lifetime = int(lifetime)
-        self.protocol = protocol.lower()
         self.timeout = float(timeout)
         self.retries = int(retries)
 
     def _rpc(self, payload: bytes, expect_op: int) -> bytes:
-        last = None
+        last = "no reply"
         for attempt in range(self.retries):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.settimeout(self.timeout)
@@ -100,7 +128,7 @@ class NatPmpSource(IPortSource):
                 if len(data) < 4:
                     last = "short reply"
                     continue
-                ver, op, result = data[0], data[1], struct.unpack(">H", data[2:4])[0]
+                op, result = data[1], struct.unpack(">H", data[2:4])[0]
                 if op != expect_op:
                     last = f"opcode {op} (wanted {expect_op})"
                     continue
@@ -114,32 +142,55 @@ class NatPmpSource(IPortSource):
             time.sleep(0.4 * (attempt + 1))
         raise FyrWireError(f"NAT-PMP gateway {self.gateway} unreachable ({last})")
 
-    def discover(self) -> Endpoint:
+    def resolve(self, requests: list[PortRequestData]) -> EndpointData:
         pub = self._rpc(struct.pack(">BB", 0, 0), 128)
-        ip = socket.inet_ntoa(pub[8:12])
+        host = socket.inet_ntoa(pub[8:12])
 
-        op = 2 if self.protocol == "tcp" else 1
-        req = struct.pack(">BBHHHI", 0, op, 0, self.internal_port, 0, self.lifetime)
-        rep = self._rpc(req, 128 + op)
-        external_port = struct.unpack(">H", rep[10:12])[0]
-        if external_port == 0:
-            raise FyrWireError("NAT-PMP returned external port 0")
-        return Endpoint(ip, external_port)
+        ports: dict[str, int] = {}
+        partial: set[str] = set()
+        for req in requests:
+            op = 2 if req.protocol.lower() == "tcp" else 1
+            frame = struct.pack(">BBHHHI", 0, op, 0, req.internal_port, 0, self.lifetime)
+            try:
+                rep = self._rpc(frame, 128 + op)
+            except FyrWireError:
+                partial.add(req.key)
+                continue
+            ext = struct.unpack(">H", rep[10:12])[0]
+            if ext == 0:
+                partial.add(req.key)
+                continue
+            ports[req.key] = ext
+
+        if not ports:
+            raise FyrWireError("NAT-PMP returned no usable mappings")
+        return EndpointData(host, ports, partial)
 
 
 @register("upnp")
 class UpnpSource(IPortSource):
 
-    def __init__(self, internal_port: int, protocol: str = "TCP", binary: str = "upnpc"):
-        self.internal_port, self.protocol, self.binary = int(internal_port), protocol, binary
+    def __init__(self, binary: str = "upnpc", timeout: int = 30):
+        self.binary, self.timeout = binary, int(timeout)
 
-    def discover(self) -> Endpoint:
+    def resolve(self, requests: list[PortRequestData]) -> EndpointData:
         if not shutil.which(self.binary):
             raise FyrWireError(f"{self.binary} not found; install miniupnpc or use source=command")
-        r = subprocess.run([self.binary, "-r", str(self.internal_port), self.protocol],
-                           capture_output=True, text=True, timeout=30)
-        ip = re.search(r"ExternalIPAddress\s*=\s*([0-9.]+)", r.stdout)
-        port = re.search(r"external .*?:(\d+)", r.stdout)
-        if not (ip and port):
+        host = None
+        ports: dict[str, int] = {}
+        partial: set[str] = set()
+        for req in requests:
+            r = subprocess.run([self.binary, "-r", str(req.internal_port),
+                                req.protocol.upper()],
+                               capture_output=True, text=True, timeout=self.timeout)
+            ip = re.search(r"ExternalIPAddress\s*=\s*([0-9.]+)", r.stdout)
+            port = re.search(r"external .*?:(\d+)", r.stdout)
+            if ip:
+                host = ip.group(1)
+            if port:
+                ports[req.key] = int(port.group(1))
+            else:
+                partial.add(req.key)
+        if not host or not ports:
             raise FyrWireError("could not parse upnpc output")
-        return Endpoint(ip.group(1), int(port.group(1)))
+        return EndpointData(host, ports, partial)

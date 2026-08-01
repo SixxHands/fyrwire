@@ -120,6 +120,22 @@ def verify_token(token: str) -> tuple[bool, str]:
     return False, msg
 
 
+def list_zones(token: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    page = 1
+    while page <= 10:
+        r = _cf(token, f"/zones?per_page=50&page={page}")
+        if not r.get("success"):
+            break
+        for z in r.get("result", []):
+            out.append((z["id"], z["name"]))
+        info = r.get("result_info") or {}
+        if page >= int(info.get("total_pages", 1)):
+            break
+        page += 1
+    return sorted(out, key=lambda t: t[1])
+
+
 def find_zone(token: str, domain: str) -> tuple[str | None, str]:
     labels = domain.split(".")
     for i in range(len(labels) - 1):

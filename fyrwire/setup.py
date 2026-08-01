@@ -72,17 +72,12 @@ def run(config_path: str, force: bool = False) -> int:
 
     _say()
     _say(f"{TEXT}Cloudflare{RESET}")
-    domain = _ask("Domain your records live under (e.g. play.example.com)")
-    if not domain:
-        _bad("a domain is required")
-        return 1
-
     token = os.environ.get("FYRWIRE_CF_TOKEN", "")
     if token:
         _say(f"  {DIM}using FYRWIRE_CF_TOKEN from the environment{RESET}")
     else:
-        _say(f"  {DIM}Create one at dash.cloudflare.com → My Profile → API Tokens,")
-        _say(f"  using the 'Edit zone DNS' template for this zone.{RESET}")
+        _say(f"  {DIM}dash.cloudflare.com -> My Profile -> API Tokens ->")
+        _say(f"  'Edit zone DNS' template. That is the only thing you need.{RESET}")
         token = _ask("API token")
     if not token:
         _bad("a token is required")
@@ -94,49 +89,85 @@ def run(config_path: str, force: bool = False) -> int:
         return 1
     _ok(f"token valid ({why})")
 
-    zone_id, zone_name = detect.find_zone(token, domain)
-    if not zone_id:
-        _bad(zone_name)
+    zones = detect.list_zones(token)
+    if not zones:
+        _bad("that token cannot see any zones")
+        _say(f"    {DIM}Re-create it with Zone:DNS:Edit on the zone you want.{RESET}")
         return 1
-    _ok(f"zone {zone_name} → {zone_id}")
+
+    if len(zones) == 1:
+        zone_id, zone_name = zones[0]
+        _ok(f"one zone available: {zone_name}")
+    else:
+        _say(f"  {DIM}zones this token can edit:{RESET}")
+        for i, (_, name) in enumerate(zones, 1):
+            _say(f"    {DIM}{i}){RESET} {name}")
+        pick = _ask("Which one", "1")
+        idx = int(pick) - 1 if pick.isdigit() and 0 < int(pick) <= len(zones) else 0
+        zone_id, zone_name = zones[idx]
+        _ok(f"using {zone_name}")
 
     can, why = detect.can_edit_zone(token, zone_id)
     if not can:
-        _bad(f"token cannot read that zone's DNS: {why}")
+        _bad(f"token cannot manage DNS in {zone_name}: {why}")
         _say(f"    {DIM}This is the failure that looks like success -- Cloudflare")
-        _say(f"    answers HTTP 200 for it. Re-create the token with Zone:DNS:Edit.{RESET}")
+        _say(f"    answers HTTP 200 for it. Re-create with Zone:DNS:Edit.{RESET}")
         return 1
-    _ok("token can manage DNS in that zone")
+    _ok(f"token can manage DNS in {zone_name}")
+
+    from . import presets as _presets
 
     _say()
-    _say(f"{TEXT}Services to publish{RESET}")
+    _say(f"{TEXT}What are you publishing?{RESET}")
+    plist = _presets.listing()
+    for i, pre in enumerate(plist, 1):
+        colour = {"srv": OK, "https": WARN, "manual": DIM}[pre.follows]
+        port = str(pre.port) if pre.port else "?"
+        _say(f"  {DIM}{i:>2}){RESET} {pre.label:<26}{DIM}{port:>6} {pre.protocol}"
+             f"{RESET}  {colour}{pre.follows}{RESET}")
+    _say(f"  {DIM}     'srv' follows the port automatically; 'manual' means you")
+    _say(f"  {DIM}     hand out host:port. `fyrwire presets` explains each.{RESET}")
+
     listening = detect.listening_ports()
     if listening:
-        for i, (port, proc) in enumerate(listening, 1):
-            _say(f"  {DIM}{i}){RESET} {port:<7} {DIM}{proc or '?'}{RESET}")
-        picked = _ask("Numbers to expose, comma separated (or blank to enter manually)")
-    else:
-        picked = ""
+        _say(f"  {DIM}listening here: "
+             f"{', '.join(str(p) + (f' ({q})' if q else '') for p, q in listening)}{RESET}")
 
     services = []
-    chosen: list[tuple[int, str]] = []
-    if picked:
-        for tok in picked.split(","):
-            tok = tok.strip()
-            if tok.isdigit() and 1 <= int(tok) <= len(listening):
-                chosen.append(listening[int(tok) - 1])
-    if not chosen:
-        p = _ask("Port to expose", "25565")
-        chosen = [(int(p), "")]
+    while True:
+        pick = _ask("Number (blank when done)" if services else "Number")
+        if not pick:
+            if services:
+                break
+            continue
+        if not (pick.isdigit() and 1 <= int(pick) <= len(plist)):
+            _bad("pick a number from the list")
+            continue
+        pre = plist[int(pick) - 1]
+
+        default_port = pre.port or (listening[0][0] if listening else 25565)
+        port = _ask(f"  port for {pre.label}", str(default_port))
+        key = _ask("  short name", pre.key)
+        if any(x["name"] == key for x in services):
+            _bad(f"already have a service called {key!r}")
+            continue
+        srv = pre.srv_name(zone_name) if pre.record != "https" else \
+            _ask("  hostname", f"{key}.{zone_name}")
+        services.append({"name": key, "internal_port": int(port),
+                         "protocol": pre.protocol, "srv_name": srv,
+                         "record": pre.record, "preset": pre.key})
+        _ok(f"{key}: {pre.protocol}/{port} -> {srv}")
+        if pre.follows == "manual":
+            _warn(f"  {pre.label} clients do not follow DNS ports — you will "
+                  f"hand out host:port")
+        elif pre.follows == "https":
+            _warn(f"  browsers may ignore the port; see the README")
+        if pre.note:
+            _say(f"    {DIM}{pre.note}{RESET}")
+        if not _yes("Add another?", False):
+            break
 
     a_name = _ask("Name for THIS MACHINE's address record", f"node.{zone_name}")
-    for port, proc in chosen:
-        _say(f"  {DIM}service on port {port} ({proc or 'unknown'}){RESET}")
-        key = _ask("  short name", proc or f"svc{port}")
-        proto = _ask("  protocol", "tcp")
-        srv = _ask("  SRV record name", f"_{key}._{proto}.{zone_name}")
-        services.append({"name": key, "internal_port": port,
-                         "protocol": proto, "srv_name": srv})
 
     src_block = (f'type     = "natpmp"\ngateway  = "{gateway}"\nlifetime = 120'
                  if source_type == "natpmp" else
@@ -152,8 +183,10 @@ def run(config_path: str, force: bool = False) -> int:
             f'[node]\na_name = "{a_name}"\nttl    = 60\n\n']
     for s in services:
         body.append(f'[[service]]\nname          = "{s["name"]}"\n'
+                    f'preset        = "{s["preset"]}"\n'
                     f'internal_port = {s["internal_port"]}\n'
                     f'protocol      = "{s["protocol"]}"\n'
+                    f'record        = "{s["record"]}"\n'
                     f'srv_name      = "{s["srv_name"]}"\n\n')
     body.append("[agent]\ninterval = 45\n")
 
@@ -210,36 +243,54 @@ def add_service(config_path: str) -> int:
         _say(f"  {DIM}{s.key:<14} {s.protocol}/{s.internal_port:<7} {s.srv_name}{RESET}")
     _say()
 
-    listening = [(p, proc) for p, proc in detect.listening_ports()
-                 if p not in {s.internal_port for s in plan.services}]
-    if listening:
-        _say(f"{TEXT}Listening and not yet published{RESET}")
-        for i, (port, proc) in enumerate(listening, 1):
-            _say(f"  {DIM}{i}){RESET} {port:<7} {DIM}{proc or '?'}{RESET}")
-        pick = _ask("Number, or a port to enter manually")
-    else:
-        pick = _ask("Port to expose")
+    from . import presets as _presets
 
-    if pick.isdigit() and listening and 1 <= int(pick) <= len(listening):
-        port, proc = listening[int(pick) - 1]
-    elif pick.isdigit():
-        port, proc = int(pick), ""
-    else:
-        _bad("need a port")
+    plist = _presets.listing()
+    _say(f"{TEXT}What kind of service?{RESET}")
+    for i, pre_ in enumerate(plist, 1):
+        colour = {"srv": OK, "https": WARN, "manual": DIM}[pre_.follows]
+        port_s = str(pre_.port) if pre_.port else "?"
+        _say(f"  {DIM}{i:>2}){RESET} {pre_.label:<26}{DIM}{port_s:>6}{RESET}  "
+             f"{colour}{pre_.follows}{RESET}")
+    sel = _ask("Number", "9")
+    pre = plist[int(sel) - 1] if sel.isdigit() and 1 <= int(sel) <= len(plist) \
+        else _presets.get("generic-tcp")
+
+    taken = {s.internal_port for s in plan.services}
+    listening = [(p, proc) for p, proc in detect.listening_ports() if p not in taken]
+    if listening:
+        _say(f"  {DIM}listening and unpublished: "
+             f"{', '.join(str(p) + (f' ({q})' if q else '') for p, q in listening)}{RESET}")
+    default_port = pre.port or (listening[0][0] if listening else 0)
+    port_in = _ask("Port", str(default_port) if default_port else "")
+    if not port_in.isdigit():
+        _bad("need a port number")
         return 1
+    port = int(port_in)
+    proc = next((q for p, q in listening if p == port), "")
 
     zone = plan.a_name.split(".", 1)[1] if "." in plan.a_name else plan.a_name
-    key = _ask("Short name", proc or f"svc{port}")
+    key = _ask("Short name", pre.key if pre.port else (proc or f"svc{port}"))
     if key in existing:
         _bad(f"a service called {key!r} already exists")
         return 1
-    proto = _ask("Protocol", "tcp")
-    srv = _ask("SRV record name", f"_{key}._{proto}.{zone}")
+    proto = pre.protocol
+    record = pre.record
+    srv = pre.srv_name(zone) if record != "https" else _ask("Hostname", f"{key}.{zone}")
+
+    if pre.follows == "manual":
+        _warn(f"{pre.label} clients do not follow DNS ports — hand out host:port")
+    elif pre.follows == "https":
+        _warn("browsers may ignore the port; see the README")
+    if pre.note:
+        _say(f"  {DIM}{pre.note}{RESET}")
 
     with open(config_path, "a") as fh:
         fh.write(f'\n[[service]]\nname          = "{key}"\n'
+                 f'preset        = "{pre.key}"\n'
                  f'internal_port = {port}\n'
                  f'protocol      = "{proto}"\n'
+                 f'record        = "{record}"\n'
                  f'srv_name      = "{srv}"\n')
     _ok(f"added {key} to {config_path}")
 

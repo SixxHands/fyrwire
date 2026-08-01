@@ -195,6 +195,66 @@ def run(config_path: str, force: bool = False) -> int:
     return 0
 
 
+def add_service(config_path: str) -> int:
+    from .cli import build_plan, load_config
+
+    if not os.path.exists(config_path):
+        _bad(f"no config at {config_path} — run `fyrwire setup` first")
+        return 1
+    cfg = load_config(config_path, resolve_secrets=False)
+    plan = build_plan(cfg)
+    existing = {s.key for s in plan.services}
+
+    _say(f"{TEXT}Existing services{RESET}")
+    for s in plan.services:
+        _say(f"  {DIM}{s.key:<14} {s.protocol}/{s.internal_port:<7} {s.srv_name}{RESET}")
+    _say()
+
+    listening = [(p, proc) for p, proc in detect.listening_ports()
+                 if p not in {s.internal_port for s in plan.services}]
+    if listening:
+        _say(f"{TEXT}Listening and not yet published{RESET}")
+        for i, (port, proc) in enumerate(listening, 1):
+            _say(f"  {DIM}{i}){RESET} {port:<7} {DIM}{proc or '?'}{RESET}")
+        pick = _ask("Number, or a port to enter manually")
+    else:
+        pick = _ask("Port to expose")
+
+    if pick.isdigit() and listening and 1 <= int(pick) <= len(listening):
+        port, proc = listening[int(pick) - 1]
+    elif pick.isdigit():
+        port, proc = int(pick), ""
+    else:
+        _bad("need a port")
+        return 1
+
+    zone = plan.a_name.split(".", 1)[1] if "." in plan.a_name else plan.a_name
+    key = _ask("Short name", proc or f"svc{port}")
+    if key in existing:
+        _bad(f"a service called {key!r} already exists")
+        return 1
+    proto = _ask("Protocol", "tcp")
+    srv = _ask("SRV record name", f"_{key}._{proto}.{zone}")
+
+    with open(config_path, "a") as fh:
+        fh.write(f'\n[[service]]\nname          = "{key}"\n'
+                 f'internal_port = {port}\n'
+                 f'protocol      = "{proto}"\n'
+                 f'srv_name      = "{srv}"\n')
+    _ok(f"added {key} to {config_path}")
+
+    try:
+        build_plan(load_config(config_path, resolve_secrets=False))
+        _ok("config still parses")
+    except Exception as e:
+        _bad(f"config no longer parses: {e}")
+        return 1
+    if proto.lower() != "tcp":
+        _warn("UDP services get an SRV record but are not relayed yet")
+    _say(f"\n  {LABEL}fyrwire once{RESET}   {DIM}publish it{RESET}")
+    return 0
+
+
 UNIT = """[Unit]
 Description=FyrWire — keep names pointed at a moving endpoint
 After=network-online.target

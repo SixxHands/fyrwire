@@ -182,6 +182,53 @@ def cmd_doctor(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_add(args) -> int:
+    return setup.add_service(args.config)
+
+
+def cmd_check(args) -> int:
+    from . import dns
+    cfg = load_config(args.config, resolve_secrets=False)
+    plan = build_plan(cfg)
+    ok_all = True
+
+    for svc in plan.services:
+        print(f"  {svc.key}")
+        try:
+            recs = dns.srv(svc.srv_name, args.resolver)
+        except dns.DnsError as e:
+            print(f"    SRV  {svc.srv_name}  FAILED — {e}")
+            ok_all = False
+            continue
+        if not recs:
+            print(f"    SRV  {svc.srv_name}  no records")
+            ok_all = False
+            continue
+        for prio, weight, port, target in recs:
+            print(f"    SRV  {svc.srv_name} -> {prio} {weight} {port} {target}")
+            try:
+                ips = dns.a(target, args.resolver)
+            except dns.DnsError as e:
+                print(f"    A    {target}  FAILED — {e}")
+                ok_all = False
+                continue
+            if not ips:
+                print(f"    A    {target}  no address — SRV points at a name "
+                      f"with no A record")
+                ok_all = False
+                continue
+            for ip in ips:
+                if svc.protocol.lower() != "tcp":
+                    print(f"    A    {target} -> {ip}   "
+                          f"(UDP: cannot be probed by connecting)")
+                    continue
+                good, why = dns.reachable(ip, port, args.timeout)
+                print(f"    TCP  {ip}:{port}  " +
+                      ("REACHABLE" if good else f"UNREACHABLE — {why}"))
+                ok_all &= good
+    return 0 if ok_all else 1
+
+
 def cmd_sources(args) -> int:
     print("sources:   " + ", ".join(sources.available()))
     print("providers: " + ", ".join(providers.available()))
@@ -317,8 +364,14 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_setup)
     p = sub.add_parser("install", help="run it in the background (systemd user unit)")
     p.set_defaults(fn=cmd_install)
+    p = sub.add_parser("add", help="add a service to an existing config")
+    p.set_defaults(fn=cmd_add)
     p = sub.add_parser("doctor", help="check an existing setup, publish nothing")
     p.set_defaults(fn=cmd_doctor)
+    p = sub.add_parser("check", help="verify from outside: resolve, then connect")
+    p.add_argument("--resolver", help="DNS server to ask (default: public resolvers)")
+    p.add_argument("--timeout", type=float, default=6.0)
+    p.set_defaults(fn=cmd_check)
     p = sub.add_parser("sources", help="list plug-ins"); p.set_defaults(fn=cmd_sources)
     p = sub.add_parser("once", help="one reconcile cycle")
     p.add_argument("--dry-run", action="store_true"); p.add_argument("--force", action="store_true")

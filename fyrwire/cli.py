@@ -206,6 +206,7 @@ def cmd_status(args) -> int:
 def cmd_ui(args) -> int:
     from .agent import AgentState
 
+    tui.PLAIN = args.plain
     cfg = load_config(args.config, resolve_secrets=False)
     plan = build_plan(cfg)
     st = AgentState.load(args.state)
@@ -230,6 +231,9 @@ def cmd_ui(args) -> int:
                 state.consecutive_failures = max(1, st.consecutive_failures)
                 print(f"probe failed: {e}", file=sys.stderr)
         return tui.dashboard(plan, state, src_name, prov_name, last, args.width)
+
+    if args.plain:
+        tui.PLAIN = True
 
     if not args.watch:
         print(frame())
@@ -274,6 +278,8 @@ def main(argv=None) -> int:
                    help="ask the gateway for current ports (no DNS credentials needed)")
     p.add_argument("--watch", type=float, metavar="SECS", help="redraw every SECS")
     p.add_argument("--width", type=int, default=0)
+    p.add_argument("--plain", action="store_true",
+                   help="flat text: no borders, no colour (screen readers, pipes)")
     p.set_defaults(fn=cmd_ui)
     p = sub.add_parser("status", help="what the agent last did")
     p.add_argument("--json", action="store_true"); p.set_defaults(fn=cmd_status)

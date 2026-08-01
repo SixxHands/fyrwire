@@ -50,8 +50,15 @@ def term_width(default: int = 96) -> int:
         return default
 
 
+PLAIN = False
+
+
 def panel(label: str, rows: list[str], status: str = "", width: int = 0,
           status_colour: str = OK) -> list[str]:
+    if PLAIN:
+        head = f"{label}" + (f"  [{status}]" if status else "")
+        return [head] + [f"  {_ANSI.sub('', r)}" for r in rows]
+
     width = width or min(term_width(), 100)
     lab = f"┤ {label} ├"
     st = f"┤ {status} ├" if status else ""
@@ -80,12 +87,19 @@ def kv(key: str, value: str, colour: str = TEXT, keyw: int = 12) -> str:
     return f"{DIM}{key:<{keyw}}{RESET}{colour}{value}{RESET}"
 
 
+def cmd(invocation: str, description: str, w: int = 26) -> str:
+    return f"{LABEL}{invocation:<{w}}{RESET}{DIM}{description}{RESET}"
+
+
 def dashboard(plan, state, source_name: str, provider_name: str,
               last: dict | None = None, width: int = 0) -> str:
     from . import banner
 
     width = width or min(term_width(), 100)
-    out: list[str] = [banner.render(), banner.tagline(), ""]
+    if PLAIN:
+        out: list[str] = [f"FyrWire — {banner.TAGLINE}", ""]
+    else:
+        out = [banner.render(), banner.tagline(), ""]
 
     if state.consecutive_failures:
         node_status, colour = f"DEGRADED x{state.consecutive_failures}", BAD
@@ -105,17 +119,20 @@ def dashboard(plan, state, source_name: str, provider_name: str,
 
     skipped = set((last or {}).get("skipped") or [])
     EXT = 10
-    rows = [f"{DIM}{'service':<12}{'proto':<7}{'internal':>9}   {'external':>{EXT}}   srv{RESET}"]
+    lead = "stat" if PLAIN else " "
+    rows = [f"{DIM}{lead} {'service':<10}{'proto':<7}{'internal':>9}   "
+            f"{'external':>{EXT}}   srv{RESET}"]
     for svc in plan.services:
         ext = state.last_ports.get(svc.key)
         if svc.key in skipped:
-            mark, ec = BAD, f"{BAD}{'unresolved':>{EXT}}{RESET}"
+            mark, ec, word = BAD, f"{BAD}{'unresolved':>{EXT}}{RESET}", "FAIL"
         elif ext:
-            mark, ec = OK, f"{OK}{ext:>{EXT}}{RESET}"
+            mark, ec, word = OK, f"{OK}{ext:>{EXT}}{RESET}", "ok  "
         else:
-            mark, ec = DIM, f"{DIM}{'—':>{EXT}}{RESET}"
+            mark, ec, word = DIM, f"{DIM}{'—':>{EXT}}{RESET}", "--  "
+        bullet = word if PLAIN else f"{mark}●{RESET}"
         rows.append(
-            f"{mark}●{RESET} {TEXT}{svc.key:<10}{RESET}"
+            f"{bullet} {TEXT}{svc.key:<10}{RESET}"
             f"{DIM}{svc.protocol:<7}{RESET}"
             f"{TEXT}{svc.internal_port:>9}{RESET}   {ec}   "
             f"{DIM}{svc.srv_name}{RESET}"
@@ -141,6 +158,20 @@ def dashboard(plan, state, source_name: str, provider_name: str,
     else:
         rows.append(f"{DIM}no changes recorded yet{RESET}")
     out += panel("fyrwire://activity", rows, "", width)
+    out.append("")
+
+    out += panel("fyrwire://commands", [
+        cmd("fyrwire ui --watch 5", "redraw this screen every 5s"),
+        cmd("fyrwire once --dry-run", "resolve and print, publish nothing"),
+        cmd("fyrwire once", "reconcile now"),
+        cmd("fyrwire run", "reconcile forever"),
+        cmd("fyrwire status --json", "machine-readable state"),
+        cmd("fyrwire sources", "list available plug-ins"),
+    ], "", width)
+
+    if not PLAIN:
+        out.append(f"{DIM}  --probe asks the gateway live · --plain for flat "
+                   f"text · NO_COLOR respected{RESET}")
 
     return "\n".join(out)
 

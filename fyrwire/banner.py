@@ -50,8 +50,16 @@ def render(text: str = "FyrWire", colour: bool | None = None, stream=None) -> st
     return "\n".join(out)
 
 
-def tagline() -> str:
-    return "  Keep your connections... connected!"
+TAGLINE = "Keep your connections... connected!"
+
+
+def width_of(text: str = "FyrWire") -> int:
+    return sum(len(_GLYPHS[c][0]) for c in text.upper() if c in _GLYPHS)
+
+
+def tagline(text: str = TAGLINE, under: str = "FyrWire") -> str:
+    pad = max(0, (width_of(under) - len(text)) // 2)
+    return " " * pad + text
 
 
 if __name__ == "__main__":

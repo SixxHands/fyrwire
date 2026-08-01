@@ -18,6 +18,8 @@ class AgentState:
     total_publishes: int = 0
     total_failures: int = 0
     history: list = field(default_factory=list)
+    alerted_down: bool = False
+    alerted_services: list = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -42,7 +44,7 @@ class AgentState:
 class Agent:
     def __init__(self, source, provider, plan: NodePlanData, state_path: str, log=print,
                  relay: bool = False, bind_host: str | None = None,
-                 target_host: str = "127.0.0.1"):
+                 target_host: str = "127.0.0.1", notifier=None):
         self.source = source
         self.provider = provider
         self.plan = plan
@@ -52,6 +54,7 @@ class Agent:
         self.target_host = target_host
         self.bind_host = bind_host
         self.relays = RelayManager(log=log) if relay else None
+        self.notifier = notifier
 
     def tick(self, force: bool = False) -> dict:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -62,8 +65,11 @@ class Agent:
             self.state.total_failures += 1
             self.state.save(self.state_path)
             self.log(f"resolve failed ({self.state.consecutive_failures}x): {e}")
-            return {"ok": False, "at": stamp, "error": str(e),
-                    "kept": {"host": self.state.last_host, "ports": dict(self.state.last_ports)}}
+            report = {"ok": False, "at": stamp, "error": str(e),
+                      "kept": {"host": self.state.last_host,
+                               "ports": dict(self.state.last_ports)}}
+            self._alert(report)
+            return report
 
         if self.state.consecutive_failures:
             self.log(f"recovered after {self.state.consecutive_failures} failure(s)")
@@ -117,9 +123,20 @@ class Agent:
         if skipped:
             self.log(f"unresolved this cycle (records left alone): {', '.join(skipped)}")
 
+        report = {"ok": True, "at": stamp, "host": res.host,
+                  "ports": dict(res.ports), "changes": changes, "skipped": skipped}
+        self._alert(report)
         self.state.save(self.state_path)
-        return {"ok": True, "at": stamp, "host": res.host, "ports": dict(res.ports),
-                "changes": changes, "skipped": skipped}
+        return report
+
+    def _alert(self, report: dict) -> None:
+        if self.notifier is None:
+            return
+        try:
+            self.notifier.evaluate(report, self.state, self.plan.a_name)
+            self.state.save(self.state_path)
+        except Exception as e:
+            self.log(f"alerting error (ignored): {e}")
 
     def run(self, interval: int, max_cycles: int | None = None) -> None:
         n = 0

@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from . import banner, providers, sources, tui, setup
+from . import banner, notify, providers, sources, tui, setup
 from .agent import Agent
 from .models import FyrWireError, NodePlanData, Service
 
@@ -81,6 +81,7 @@ def build_agent(cfg: dict, state_path: str, log=print) -> Agent:
     prov = providers.build(p.pop("type"), p)
     node = cfg.get("node", {})
     return Agent(src, prov, build_plan(cfg), state_path, log=log,
+                 notifier=notify.from_config(cfg, log=log),
                  relay=bool(node.get("relay", False)),
                  bind_host=node.get("bind_host"),
                  target_host=node.get("target_host", "127.0.0.1"))

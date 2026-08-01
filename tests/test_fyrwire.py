@@ -337,6 +337,66 @@ srv_name      = "_valheim._udp.example.com"
             self.assertIn("valheim", fh.read(), "config must not be modified")
 
 
+class RecordingNotifier:
+
+    def __init__(self, after_failures=2):
+        from fyrwire.notify import Notifier
+        self.sent = []
+        self.n = Notifier(webhook=None, command=None, after_failures=after_failures,
+                          log=lambda *_: None)
+        self.n.send = lambda title, body, colour=0: self.sent.append(title)
+
+    def evaluate(self, report, state, node):
+        return self.n.evaluate(report, state, node)
+
+
+class TestAlerting(Base):
+    def _agent(self, source, notifier, p=None):
+        return Agent(source, FakeProvider(), p or plan(MC), self.state,
+                     log=lambda *_: None, notifier=notifier)
+
+    def test_single_failure_does_not_alert(self):
+        n = RecordingNotifier(after_failures=2)
+        self._agent(FakeSource(FyrWireError("blip")), n).tick()
+        self.assertEqual(n.sent, [])
+
+    def test_alerts_once_after_the_threshold(self):
+        n = RecordingNotifier(after_failures=2)
+        src = FakeSource(FyrWireError("down"))
+        for _ in range(5):
+            self._agent(src, n).tick()
+        self.assertEqual(len(n.sent), 1, "one alert per episode, not per cycle")
+        self.assertIn("cannot reach", n.sent[0])
+
+    def test_recovery_alerts_immediately(self):
+        n = RecordingNotifier(after_failures=2)
+        for _ in range(2):
+            self._agent(FakeSource(FyrWireError("down")), n).tick()
+        self.assertEqual(len(n.sent), 1)
+        self._agent(FakeSource(EndpointData("1.1.1.1", {"minecraft": 100})), n).tick()
+        self.assertEqual(len(n.sent), 2)
+        self.assertIn("recovered", n.sent[1])
+
+    def test_per_service_transitions(self):
+        p = plan(MC, VH)
+        n = RecordingNotifier()
+        self._agent(FakeSource(
+            EndpointData("1.1.1.1", {"valheim": 200}, partial={"minecraft"})), n, p).tick()
+        self.assertTrue(any("minecraft" in t for t in n.sent))
+        n.sent.clear()
+        self._agent(FakeSource(
+            EndpointData("1.1.1.1", {"minecraft": 100, "valheim": 200})), n, p).tick()
+        self.assertTrue(any("back" in t for t in n.sent))
+
+    def test_broken_channel_cannot_stop_reconciling(self):
+        class Exploding:
+            def evaluate(self, *a, **k):
+                raise RuntimeError("webhook exploded")
+        report = self._agent(
+            FakeSource(EndpointData("1.1.1.1", {"minecraft": 100})), Exploding()).tick()
+        self.assertTrue(report["ok"], "a broken notifier must not fail the tick")
+
+
 class TestPanels(unittest.TestCase):
     def test_geometry_is_exact(self):
         for width in (60, 80, 100, 132):

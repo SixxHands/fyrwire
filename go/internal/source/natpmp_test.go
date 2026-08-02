@@ -118,7 +118,8 @@ func TestUdpAndTcpUseDifferentOpcodes(t *testing.T) {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
 		}
-		return mapReply(req[1], 1, 2)
+
+		return mapReply(req[1], binary.BigEndian.Uint16(req[4:6]), 2)
 	})
 	host, port := addrPort(t, addr)
 	natpmpPortOverride(t, port)
@@ -261,5 +262,115 @@ func TestAFractionalTimeoutIsNotTruncatedToZero(t *testing.T) {
 	}
 	if got != "9.9.9.9" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestASubstitutedInternalPortIsDetectedAsSinglePort(t *testing.T) {
+
+	addr := fakeGateway(t, func(req []byte) []byte {
+		if req[1] == opPublicAddr {
+			return publicAddrReply([4]byte{203, 0, 113, 49})
+		}
+		internal := binary.BigEndian.Uint16(req[4:6])
+		if internal == 0 {
+			return mapReply(req[1], 52329, 52329)
+		}
+		return mapReply(req[1], internal, 52707)
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
+
+	got, single := n.SinglePort("tcp")
+	if !single || got != 52329 {
+		t.Fatalf("SinglePort = (%d, %v), want (52329, true)", got, single)
+	}
+	res, err := n.Resolve([]model.PortRequestData{
+		{Key: "mc", InternalPort: 37772, Protocol: "tcp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Ports["mc"] != 52329 {
+		t.Errorf("published %d — must be the port the gateway actually "+
+			"forwards, not the one it invented for our internal port",
+			res.Ports["mc"])
+	}
+}
+
+func TestAConformingGatewayStillGetsPerServiceMappings(t *testing.T) {
+
+	addr := fakeGateway(t, func(req []byte) []byte {
+		if req[1] == opPublicAddr {
+			return publicAddrReply([4]byte{1, 2, 3, 4})
+		}
+		internal := binary.BigEndian.Uint16(req[4:6])
+		if internal == 0 {
+			return errorReply(req[1], 2)
+		}
+		return mapReply(req[1], internal, internal+10000)
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
+	if _, single := n.SinglePort("tcp"); single {
+		t.Error("a conforming gateway must not be treated as single-port")
+	}
+	res, err := n.Resolve([]model.PortRequestData{
+		{Key: "mc", InternalPort: 25565, Protocol: "tcp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Ports["mc"] != 35565 {
+		t.Errorf("got %d, want 35565", res.Ports["mc"])
+	}
+}
+
+func TestEveryServiceSharesTheOnePortOnASinglePortGateway(t *testing.T) {
+	addr := fakeGateway(t, func(req []byte) []byte {
+		if req[1] == opPublicAddr {
+			return publicAddrReply([4]byte{1, 2, 3, 4})
+		}
+		if binary.BigEndian.Uint16(req[4:6]) == 0 {
+			return mapReply(req[1], 52329, 52329)
+		}
+		return mapReply(req[1], binary.BigEndian.Uint16(req[4:6]), 9999)
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	var warnings []string
+	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1,
+		Log: func(s string) { warnings = append(warnings, s) }}
+	res, err := n.Resolve([]model.PortRequestData{
+		{Key: "mc", InternalPort: 25565, Protocol: "tcp"},
+		{Key: "vh", InternalPort: 2456, Protocol: "tcp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range res.Ports {
+		if v != 52329 {
+			t.Errorf("%s got %d — one granted port cannot become two", k, v)
+		}
+	}
+	if len(warnings) == 0 {
+		t.Error("sharing one port between services must be said out loud")
+	}
+}
+
+func TestAGatewayThatAnswersAboutADifferentPortIsNotBelieved(t *testing.T) {
+	addr := fakeGateway(t, func(req []byte) []byte {
+		if req[1] == opPublicAddr {
+			return publicAddrReply([4]byte{1, 2, 3, 4})
+		}
+		internal := binary.BigEndian.Uint16(req[4:6])
+		if internal == 0 {
+			return errorReply(req[1], 2)
+		}
+		return mapReply(req[1], internal+1, 52707)
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
+	if _, err := n.Map(25565, "tcp"); err == nil {
+		t.Error("a reply about a different internal port must not be believed")
 	}
 }

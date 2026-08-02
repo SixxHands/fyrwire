@@ -131,6 +131,7 @@ func build(cfgPath, statePath string) (*agent.Agent, *config.Config, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	source.Logf = logln
 	src, err := source.Build(cfg.Source)
 	if err != nil {
 		return nil, nil, err

@@ -1669,3 +1669,70 @@ class TestCrossImplementationState(unittest.TestCase):
             with open(p, "w") as fh:
                 fh.write("[1,2,3]")
             self.assertIsNone(AgentState.load(p).last_host)
+
+
+class TestSinglePortGateway(unittest.TestCase):
+
+    def source(self, replies):
+        from fyrwire import sources
+        import struct as _s
+
+        class Fake(sources.NatPmpSource):
+            def __init__(self):
+                super().__init__(gateway="10.0.0.1", log=lambda m: None)
+                self.asked = []
+
+            def _rpc(self, payload, expect_op):
+                if len(payload) == 2:
+                    return b"\x00\x80\x00\x00" + b"\x00" * 4 + bytes([1, 2, 3, 4])
+                internal = _s.unpack(">H", payload[4:6])[0]
+                self.asked.append(internal)
+                got_internal, external = replies(internal)
+                return (b"\x00" + bytes([expect_op]) + b"\x00\x00" + b"\x00" * 4
+                        + _s.pack(">HH", got_internal, external)
+                        + _s.pack(">I", 60))
+
+        return Fake()
+
+    def test_a_substituted_internal_port_is_detected_as_single_port(self):
+        def proton(internal):
+            if internal == 0:
+                return 52329, 52329
+            return internal, 52707
+
+        src = self.source(proton)
+        res = src.resolve([Service("mc", 37772, "_mc._tcp.example.com").request()])
+        self.assertEqual(res.ports["mc"], 52329,
+                         "must publish the port the gateway actually forwards, "
+                         "not the one it invented for our internal port")
+
+    def test_a_conforming_gateway_still_gets_per_service_mappings(self):
+        def conforming(internal):
+            if internal == 0:
+                raise FyrWireError("NAT-PMP result code 2")
+            return internal, 10000 + internal
+
+        src = self.source(conforming)
+        res = src.resolve([Service("mc", 25565, "_mc._tcp.example.com").request()])
+        self.assertEqual(res.ports["mc"], 35565)
+
+    def test_every_service_shares_the_one_port_on_a_single_port_gateway(self):
+        def proton(internal):
+            return (52329, 52329) if internal == 0 else (internal, 9999)
+
+        src = self.source(proton)
+        res = src.resolve([
+            Service("mc", 25565, "_mc._tcp.example.com").request(),
+            Service("vh", 2456, "_vh._udp.example.com", "udp").request()])
+        self.assertEqual(set(res.ports.values()), {52329},
+                         "one granted port cannot become two")
+
+    def test_a_gateway_that_answers_the_wrong_internal_port_is_not_believed(self):
+        def liar(internal):
+            if internal == 0:
+                raise FyrWireError("NAT-PMP result code 2")
+            return internal + 1, 52707
+
+        src = self.source(liar)
+        with self.assertRaises(FyrWireError):
+            src.resolve([Service("mc", 25565, "_mc._tcp.example.com").request()])

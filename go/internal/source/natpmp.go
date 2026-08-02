@@ -36,6 +36,24 @@ type NatPmpSource struct {
 	Lifetime int
 	Timeout  float64
 	Retries  int
+
+	Log func(string)
+
+	warned map[string]bool
+}
+
+func (n *NatPmpSource) warnOnce(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	if n.warned == nil {
+		n.warned = map[string]bool{}
+	}
+	if n.warned[msg] {
+		return
+	}
+	n.warned[msg] = true
+	if n.Log != nil {
+		n.Log(msg)
+	}
 }
 
 func (n *NatPmpSource) Name() string { return "natpmp" }
@@ -119,7 +137,7 @@ func (n *NatPmpSource) PublicAddress() (string, error) {
 	return net.IP(reply[8:12]).String(), nil
 }
 
-func (n *NatPmpSource) Map(internal int, protocol string) (int, error) {
+func (n *NatPmpSource) mapRaw(internal int, protocol string) (gotInternal, external int, err error) {
 	op := byte(opMapTCP)
 	if protocol == "udp" {
 		op = opMapUDP
@@ -128,26 +146,52 @@ func (n *NatPmpSource) Map(internal int, protocol string) (int, error) {
 	if lifetime <= 0 {
 		lifetime = 120
 	}
-	if internal < 1 || internal > 65535 {
-
-		return 0, model.Errorf(
-			"internal port %d is out of range — a port is 1..65535", internal)
-	}
 	req := make([]byte, 12)
 	req[0], req[1] = natpmpVersion, op
 	binary.BigEndian.PutUint16(req[4:6], uint16(internal))
-
 	binary.BigEndian.PutUint16(req[6:8], 0)
 	binary.BigEndian.PutUint32(req[8:12], uint32(lifetime))
 
 	reply, err := n.exchange(req, 16)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := checkResult(reply, op); err != nil {
+		return 0, 0, err
+	}
+	return int(binary.BigEndian.Uint16(reply[8:10])),
+		int(binary.BigEndian.Uint16(reply[10:12])), nil
+}
+
+// Some VPNs (looking at you, Proton) hand out one port per session and ignore whatever internal port you asked for. Asking for 0 catches them.
+func (n *NatPmpSource) SinglePort(protocol string) (port int, isSingle bool) {
+	gotInternal, external, err := n.mapRaw(0, protocol)
+	if err != nil {
+		return 0, false
+	}
+	if gotInternal != 0 && gotInternal == external && external > 0 {
+		return external, true
+	}
+	return 0, false
+}
+
+func (n *NatPmpSource) Map(internal int, protocol string) (int, error) {
+	if internal < 1 || internal > 65535 {
+
+		return 0, model.Errorf(
+			"internal port %d is out of range — a port is 1..65535", internal)
+	}
+	gotInternal, granted, err := n.mapRaw(internal, protocol)
+	if err != nil {
 		return 0, err
 	}
-	granted := int(binary.BigEndian.Uint16(reply[10:12]))
+	if gotInternal != internal {
+
+		return 0, model.Errorf(
+			"asked to map internal port %d but the gateway answered with "+
+				"internal port %d — this gateway assigns one port per session "+
+				"rather than one per service", internal, gotInternal)
+	}
 	if granted == 0 {
 
 		return 0, model.Errorf(
@@ -164,6 +208,22 @@ func (n *NatPmpSource) Resolve(reqs []model.PortRequestData) (model.EndpointData
 	}
 	res := model.EndpointData{Host: host, Ports: map[string]int{},
 		Partial: map[string]bool{}}
+
+	if len(reqs) > 0 {
+		if port, single := n.SinglePort(reqs[0].Protocol); single {
+			for _, r := range reqs {
+
+				res.Ports[r.Key] = port
+			}
+			if len(reqs) > 1 {
+				n.warnOnce("this gateway grants ONE port for the whole session, "+
+					"so all %d services share port %d — only the one your relay "+
+					"targets will actually work", len(reqs), port)
+			}
+			return res, nil
+		}
+	}
+
 	for _, r := range reqs {
 		port, err := n.Map(r.InternalPort, r.Protocol)
 		if err != nil {

@@ -111,11 +111,20 @@ class CommandSource(IPortSource):
 class NatPmpSource(IPortSource):
 
     def __init__(self, gateway: str, lifetime: int = 120, timeout: float = 3.0,
-                 retries: int = 3):
+                 retries: int = 3, log=None):
         self.gateway = gateway
         self.lifetime = int(lifetime)
         self.timeout = float(timeout)
         self.retries = int(retries)
+        self._log = log
+        self._warned: set[str] = set()
+
+    def log(self, msg: str) -> None:
+        if msg in self._warned:
+            return
+        self._warned.add(msg)
+        if self._log:
+            self._log(msg)
 
     def _rpc(self, payload: bytes, expect_op: int) -> bytes:
         last = "no reply"
@@ -142,21 +151,51 @@ class NatPmpSource(IPortSource):
             time.sleep(0.4 * (attempt + 1))
         raise FyrWireError(f"NAT-PMP gateway {self.gateway} unreachable ({last})")
 
+    def _map(self, internal: int, op: int) -> tuple[int, int]:
+        frame = struct.pack(">BBHHHI", 0, op, 0, internal, 0, self.lifetime)
+        rep = self._rpc(frame, 128 + op)
+        return (struct.unpack(">H", rep[8:10])[0],
+                struct.unpack(">H", rep[10:12])[0])
+
+    def single_port(self, op: int) -> int | None:
+        try:
+            internal, external = self._map(0, op)
+        except FyrWireError:
+            return None
+        if internal != 0 and internal == external and external > 0:
+            return external
+        return None
+
     def resolve(self, requests: list[PortRequestData]) -> EndpointData:
         pub = self._rpc(struct.pack(">BB", 0, 0), 128)
         host = socket.inet_ntoa(pub[8:12])
 
         ports: dict[str, int] = {}
         partial: set[str] = set()
+
+        if requests:
+            op = 2 if requests[0].protocol.lower() == "tcp" else 1
+            granted = self.single_port(op)
+            if granted is not None:
+                for req in requests:
+                    ports[req.key] = granted
+                if len(requests) > 1:
+                    self.log(
+                        f"this gateway grants ONE port for the whole session, so "
+                        f"all {len(requests)} services share port {granted} — only "
+                        f"the one your relay targets will actually work")
+                return EndpointData(host, ports, partial)
+
         for req in requests:
             op = 2 if req.protocol.lower() == "tcp" else 1
-            frame = struct.pack(">BBHHHI", 0, op, 0, req.internal_port, 0, self.lifetime)
             try:
-                rep = self._rpc(frame, 128 + op)
+                got_internal, ext = self._map(req.internal_port, op)
             except FyrWireError:
                 partial.add(req.key)
                 continue
-            ext = struct.unpack(">H", rep[10:12])[0]
+            if got_internal != req.internal_port:
+                partial.add(req.key)
+                continue
             if ext == 0:
                 partial.add(req.key)
                 continue

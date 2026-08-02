@@ -15,6 +15,8 @@ type IPortSource interface {
 	Resolve(reqs []model.PortRequestData) (model.EndpointData, error)
 }
 
+var Logf func(string)
+
 var registry = map[string]func(config.Section) (IPortSource, error){}
 
 func register(name string, opts []config.OptionRule,

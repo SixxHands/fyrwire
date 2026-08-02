@@ -327,7 +327,8 @@ func Check(configPath string, timeout time.Duration) error {
 					continue
 				}
 				conn.Close()
-				good("  TCP %s:%d reachable", ip, a.Port)
+
+				good("  TCP %s:%d accepts connections", ip, a.Port)
 			}
 		}
 	}

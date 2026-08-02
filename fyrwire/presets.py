@@ -25,7 +25,23 @@ class PresetData:
             raise ValueError(
                 f"preset {self.key!r}: SRV protocol must be tcp or udp, "
                 f"not {self.protocol!r}")
+        if not _SERVICE_RE.match(self.service):
+            raise ValueError(
+                f"preset {self.key!r} has no usable SRV service label "
+                f"({self.service!r}); call .with_service(<label>) first")
         return f"_{self.service}._{self.protocol}.{zone}"
+
+    def with_service(self, service: str, protocol: str | None = None,
+                     port: int | None = None) -> "Preset":
+        import dataclasses
+        proto = protocol or self.protocol
+        problems = validate_custom(service, proto, port or self.port or 1,
+                                   "node.example.com", "example.com")
+        problems = [p for p in problems if "port must be" not in p]
+        if problems:
+            raise ValueError("; ".join(problems))
+        return dataclasses.replace(self, service=service, protocol=proto,
+                                   port=port if port is not None else self.port)
 
 
 GROUPS: dict[str, str] = {

@@ -26,6 +26,20 @@ def _yes(prompt: str, default: bool = True) -> bool:
     return default if not got else got.startswith("y")
 
 
+def _ensure_service_label(pre, fallback: str):
+    from . import presets as _p
+
+    if pre.record != "srv" or _p._SERVICE_RE.match(pre.service):
+        return pre
+    while True:
+        label = _ask("  SRV service label (e.g. 'minecraft', no underscores)",
+                     fallback)
+        try:
+            return pre.with_service(label)
+        except ValueError as e:
+            _bad(str(e))
+
+
 def _ok(msg: str) -> None:
     _say(f"  {OK}✓{RESET} {msg}")
 
@@ -152,6 +166,7 @@ def run(config_path: str, force: bool = False) -> int:
         if any(x["name"] == key for x in services):
             _bad(f"already have a service called {key!r}")
             continue
+        pre = _ensure_service_label(pre, key)
         srv = pre.srv_name(zone_name) if pre.record == "srv" else \
             _ask("  hostname", f"{key}.{zone_name}")
         services.append({"name": key, "internal_port": int(port),
@@ -279,6 +294,7 @@ def add_service(config_path: str) -> int:
         return 1
     proto = pre.protocol
     record = pre.record
+    pre = _ensure_service_label(pre, key)
     srv = pre.srv_name(zone) if record == "srv" else _ask("Hostname", f"{key}.{zone}")
 
     if pre.follows == "manual":

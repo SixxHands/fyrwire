@@ -478,12 +478,28 @@ class TestPresets(unittest.TestCase):
 
     def test_srv_names_are_well_formed(self):
         from fyrwire import presets
+        placeholders = []
         for p in presets.listing():
             if p.record != "srv":
+                continue
+            if not p.service:
+                placeholders.append(p.key)
+                with self.assertRaises(ValueError):
+                    p.srv_name("example.com")
                 continue
             name = p.srv_name("example.com")
             self.assertRegex(name, r"^_[a-z0-9-]+\._(tcp|udp)\.example\.com$",
                              f"{p.key} produced {name}")
+        self.assertEqual(placeholders, ["custom-srv"])
+
+    def test_custom_label_is_validated_where_it_is_entered(self):
+        from fyrwire import presets
+        c = presets.get("custom-srv")
+        self.assertEqual(c.with_service("mything", "udp").srv_name("example.com"),
+                         "_mything._udp.example.com")
+        for bad in ("_minecraft", "my.thing", "a--b", "12345", "", "-lead", "trail-"):
+            with self.assertRaises(ValueError, msg=f"accepted {bad!r}"):
+                c.with_service(bad)
 
     def test_web_is_not_advertised_as_automatic(self):
         from fyrwire import presets

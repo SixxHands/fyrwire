@@ -7,7 +7,10 @@ import threading
 import unittest
 
 from fyrwire.agent import Agent, AgentState
-from fyrwire.models import FyrWireError, NodePlanData, EndpointData, Service
+from fyrwire import providers
+from fyrwire.models import (FyrWireError, NodePlanData, EndpointData, Service,
+                            SrvRecordData)
+from fyrwire.providers import CloudflareProvider
 from fyrwire.relay import RelayManager
 from fyrwire.tui import panel, vis
 
@@ -518,3 +521,152 @@ class TestPanels(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeDesec(providers.DesecProvider):
+
+    def __init__(self, **kw):
+        existing = kw.pop("existing", {})
+        super().__init__(token="t", domain="example.com", **kw)
+        self.calls = []
+        self.existing = existing
+        self._minimum_ttl = 60
+
+    def _call(self, method, url, body=None):
+        self.calls.append((method, url, body))
+        if method == "GET":
+            return self.existing.get(url)
+        return None
+
+
+class TestDesecProvider(unittest.TestCase):
+    def test_urls_always_end_in_a_slash(self):
+        p = FakeDesec()
+        p.ensure_a("node.example.com", "1.2.3.4", 60)
+        for _, url, _ in p.calls:
+            self.assertTrue(url.endswith("/"), url)
+
+    def test_apex_is_at_sign_in_urls_but_empty_in_json(self):
+        p = FakeDesec()
+        p.ensure_a("example.com", "1.2.3.4", 60)
+        get_url = [u for m, u, _ in p.calls if m == "GET"][0]
+        self.assertIn("/rrsets/@/A/", get_url)
+        body = [b for m, _, b in p.calls if m == "PATCH"][0]
+        self.assertEqual(body[0]["subname"], "")
+
+    def test_writes_go_to_the_collection_not_the_detail_endpoint(self):
+        p = FakeDesec()
+        p.ensure_a("node.example.com", "1.2.3.4", 60)
+        patch_url = [u for m, u, _ in p.calls if m == "PATCH"][0]
+        self.assertTrue(patch_url.endswith("/rrsets/"), patch_url)
+
+    def test_write_body_is_a_list(self):
+        p = FakeDesec()
+        p.ensure_a("node.example.com", "1.2.3.4", 60)
+        body = [b for m, _, b in p.calls if m == "PATCH"][0]
+        self.assertIsInstance(body, list)
+
+    def test_srv_target_gets_a_trailing_dot(self):
+        p = FakeDesec()
+        p.ensure_srv(SrvRecordData("_minecraft._tcp.play.example.com",
+                               "node.example.com", 51471, 0, 5, 60))
+        body = [b for m, _, b in p.calls if m == "PATCH"][0]
+        self.assertEqual(body[0]["records"], ["0 5 51471 node.example.com."])
+
+    def test_no_write_when_the_record_already_matches(self):
+        url = ("https://desec.io/api/v1/domains/example.com/rrsets/node/A/")
+        p = FakeDesec(existing={url: {"ttl": 60, "records": ["1.2.3.4"]}})
+        self.assertIsNone(p.ensure_a("node.example.com", "1.2.3.4", 60))
+        self.assertEqual([m for m, _, _ in p.calls], ["GET"])
+
+    def test_case_difference_alone_is_not_a_change(self):
+        url = ("https://desec.io/api/v1/domains/example.com/rrsets/"
+               "_minecraft._tcp.play/SRV/")
+        p = FakeDesec(existing={url: {"ttl": 60,
+                                      "records": ["0 5 51471 Node.Example.com."]}})
+        self.assertIsNone(p.ensure_srv(SrvRecordData(
+            "_minecraft._tcp.play.example.com", "node.example.com",
+            51471, 0, 5, 60)))
+
+    def test_refuses_a_name_outside_the_domain(self):
+        p = FakeDesec()
+        with self.assertRaises(FyrWireError) as cm:
+            p.ensure_a("node.elsewhere.org", "1.2.3.4", 60)
+        self.assertIn("not inside", str(cm.exception))
+
+    def test_delete_without_a_witness_is_refused(self):
+        p = FakeDesec()
+        with self.assertRaises(FyrWireError) as cm:
+            p.delete("SRV", "_minecraft._tcp.play.example.com")
+        self.assertIn("witness", str(cm.exception))
+
+    def test_delete_refuses_a_record_pointing_elsewhere(self):
+        url = ("https://desec.io/api/v1/domains/example.com/rrsets/"
+               "_minecraft._tcp.play/SRV/")
+        p = FakeDesec(existing={url: {"ttl": 60,
+                                      "records": ["0 5 25565 someone-else.net."]}})
+        with self.assertRaises(FyrWireError):
+            p.delete("SRV", "_minecraft._tcp.play.example.com",
+                     expect="node.example.com")
+        self.assertNotIn("DELETE", [m for m, _, _ in p.calls])
+
+    def test_delete_proceeds_when_the_witness_matches(self):
+        url = ("https://desec.io/api/v1/domains/example.com/rrsets/"
+               "_minecraft._tcp.play/SRV/")
+        p = FakeDesec(existing={url: {"ttl": 60,
+                                      "records": ["0 5 51471 node.example.com."]}})
+        self.assertIsNotNone(p.delete("SRV", "_minecraft._tcp.play.example.com",
+                                      expect="node.example.com"))
+        self.assertIn("DELETE", [m for m, _, _ in p.calls])
+
+    def test_delete_of_an_absent_record_is_a_no_op(self):
+        p = FakeDesec()
+        self.assertIsNone(p.delete("SRV", "_minecraft._tcp.play.example.com",
+                                   expect="node.example.com"))
+
+    def test_ttl_below_the_floor_is_refused_with_the_number_in_it(self):
+        p = FakeDesec()
+        p._minimum_ttl = 3600
+        with self.assertRaises(FyrWireError) as cm:
+            p.ensure_a("node.example.com", "1.2.3.4", 60)
+        msg = str(cm.exception)
+        self.assertIn("3600", msg)
+        self.assertIn("exception", msg)
+
+
+class FakeCloudflare(CloudflareProvider):
+    def __init__(self):
+        self.token, self.zone, self.timeout = "t", "z", 5
+        self._ids = {}
+        self.records = []
+        self.deleted = []
+
+    def _find(self, rtype, name):
+        for r in self.records:
+            if r["type"] == rtype and r["name"] == name:
+                return r["id"], r
+        return None, None
+
+    def _call(self, method, path, body=None):
+        if method == "DELETE":
+            self.deleted.append(path)
+        return {"success": True, "result": {}}
+
+
+class TestOwnershipWitness(unittest.TestCase):
+
+    def test_cloudflare_witness_is_checked_in_addition_to_the_tag(self):
+        cf = FakeCloudflare()
+        cf.records = [{"id": "1", "type": "SRV",
+                       "name": "_minecraft._tcp.play.example.com",
+                       "comment": CloudflareProvider.TAG,
+                       "data": {"target": "somewhere-else.net"}}]
+        with self.assertRaises(FyrWireError):
+            cf.delete("SRV", "_minecraft._tcp.play.example.com",
+                      expect="node.example.com")
+
+    def test_every_provider_accepts_the_witness_argument(self):
+        import inspect
+        for name in providers.available():
+            sig = inspect.signature(providers._REGISTRY[name].delete)
+            self.assertIn("expect", sig.parameters, name)

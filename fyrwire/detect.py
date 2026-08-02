@@ -115,3 +115,37 @@ def can_edit_zone(token: str, zone_id: str) -> tuple[bool, str]:
         return True, "ok"
     msg = "; ".join(e.get("message", "?") for e in r.get("errors", [])) or "denied"
     return False, msg
+
+
+DESEC_API = "https://desec.io/api/v1"
+
+
+def _desec(token: str, path: str, timeout: int = 10):
+    req = urllib.request.Request(f"{DESEC_API}{path}")
+    req.add_header("Authorization", f"Token {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode() or "null"), ""
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = json.loads(e.read().decode()).get("detail", "")
+        except Exception:
+            pass
+        return None, detail or f"HTTP {e.code}"
+    except Exception as e:
+        return None, str(e)
+
+
+def desec_domains(token: str) -> tuple[list[tuple[str, int]], str]:
+    data, err = _desec(token, "/domains/")
+    if data is None:
+        return [], err
+    rows = data.get("results", data) if isinstance(data, dict) else data
+    out = []
+    for d in rows or []:
+        try:
+            out.append((d["name"], int(d.get("minimum_ttl", 3600))))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out, ""

@@ -168,18 +168,39 @@ def cmd_doctor(args) -> int:
         print(f"  gateway {gw:<16} " + (f"OK  public {pub}" if pub else "NO REPLY"))
         ok &= bool(pub)
 
-    tok = os.environ.get("FYRWIRE_CF_TOKEN", "")
-    zone = cfg["provider"].get("zone_id", "")
-    if tok and zone:
-        good, why = detect.verify_token(tok)
-        print(f"  token                    " + ("OK" if good else f"BAD  {why}"))
-        ok &= good
-        if good:
-            can, why = detect.can_edit_zone(tok, zone)
-            print(f"  zone access              " + ("OK" if can else f"DENIED  {why}"))
-            ok &= can
+    ptype = cfg["provider"].get("type", "cloudflare")
+    if ptype == "desec":
+        tok = os.environ.get("FYRWIRE_DESEC_TOKEN", "")
+        domain = cfg["provider"].get("domain", "")
+        if tok:
+            domains, err = detect.desec_domains(tok)
+            names = {n for n, _ in domains}
+            print(f"  token                    " + ("OK" if not err else f"BAD  {err}"))
+            ok &= not err
+            if not err:
+                have = domain in names
+                print(f"  domain access            "
+                      + ("OK" if have else f"DENIED  token cannot see {domain}"))
+                ok &= have
+                for n, mt in domains:
+                    if n == domain and mt > plan.ttl:
+                        print(f"  ttl                      "
+                              f"WARN  deSEC floor is {mt}s, config asks {plan.ttl}s")
+        else:
+            print("  token                    SKIPPED (FYRWIRE_DESEC_TOKEN unset)")
     else:
-        print("  token                    SKIPPED (FYRWIRE_CF_TOKEN unset)")
+        tok = os.environ.get("FYRWIRE_CF_TOKEN", "")
+        zone = cfg["provider"].get("zone_id", "")
+        if tok and zone:
+            good, why = detect.verify_token(tok)
+            print(f"  token                    " + ("OK" if good else f"BAD  {why}"))
+            ok &= good
+            if good:
+                can, why = detect.can_edit_zone(tok, zone)
+                print(f"  zone access              " + ("OK" if can else f"DENIED  {why}"))
+                ok &= can
+        else:
+            print("  token                    SKIPPED (FYRWIRE_CF_TOKEN unset)")
 
     listening = {p for p, _ in detect.listening_ports()}
     for svc in plan.services:

@@ -7,6 +7,13 @@ from abc import ABC, abstractmethod
 
 from .models import FyrWireError, HttpsRecordData, SrvRecordData
 
+
+class RateLimited(FyrWireError):
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
 _REGISTRY: dict[str, type["DnsProvider"]] = {}
 
 
@@ -48,7 +55,7 @@ class IDnsProvider(ABC):
         pass
 
     @abstractmethod
-    def delete(self, rtype: str, name: str) -> str | None:
+    def delete(self, rtype: str, name: str, expect: str | None = None) -> str | None:
         pass
 
 
@@ -80,6 +87,10 @@ class CloudflareProvider(IDnsProvider):
             raise FyrWireError(f"cloudflare returned unparseable JSON: {e}") from None
 
         if not payload.get("success", False):
+            codes = {er.get("code") for er in payload.get("errors", [])}
+            if 971 in codes or any("rate" in str(er.get("message", "")).lower()
+                                   for er in payload.get("errors", [])):
+                raise RateLimited(f"cloudflare rate limit on {method} {path}")
             errs = "; ".join(
                 f"{er.get('code')}: {er.get('message')}" for er in payload.get("errors", [])
             ) or "unknown error"
@@ -163,7 +174,7 @@ class CloudflareProvider(IDnsProvider):
         }, rec.ttl, self.TAG)
         return f"{what} -> {rec.value}" if what else None
 
-    def delete(self, rtype: str, name: str) -> str | None:
+    def delete(self, rtype: str, name: str, expect: str | None = None) -> str | None:
         rid, existing = self._find(rtype, name)
         if not rid:
             return None
@@ -172,6 +183,158 @@ class CloudflareProvider(IDnsProvider):
             raise FyrWireError(
                 f"{rtype} {name} is not tagged '{self.TAG}' — refusing to delete "
                 f"a record FyrWire did not create")
+        if expect is not None:
+            data = (existing or {}).get("data") or {}
+            actual = str(data.get("target") or existing.get("content") or "")
+            if actual.rstrip(".") != expect.rstrip("."):
+                raise FyrWireError(
+                    f"{rtype} {name} points at {actual!r}, not the expected "
+                    f"{expect!r} — refusing to delete a record that is not ours")
         self._call("DELETE", f"/zones/{self.zone}/dns_records/{rid}")
         self._ids.pop((rtype, name), None)
+        return f"deleted {rtype} {name}"
+
+
+@register("desec")
+# deSEC enforces a strict per-domain minimum TTL (usually 3600s) and rejects anything lower, so check it upfront.
+class DesecProvider(IDnsProvider):
+
+    API = "https://desec.io/api/v1"
+
+    def __init__(self, token: str, domain: str, timeout: int = 10):
+        if not token or not domain:
+            raise FyrWireError("desec provider needs token and domain")
+        self.token = token
+        self.domain = domain.strip(".").lower()
+        self.timeout = int(timeout)
+        self._minimum_ttl: int | None = None
+
+    def _url(self, *parts: str) -> str:
+        return f"{self.API}/" + "/".join(p.strip("/") for p in parts) + "/"
+
+    def _call(self, method: str, url: str, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Token {self.token}")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                raw = r.read().decode()
+                return json.loads(raw) if raw.strip() else None
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:300]
+            if e.code == 429:
+                retry = e.headers.get("Retry-After")
+                try:
+                    retry = float(retry) if retry else None
+                except ValueError:
+                    retry = None
+                raise RateLimited(
+                    f"desec rate limit ({detail})", retry_after=retry) from None
+            if e.code == 404:
+                return None
+            raise FyrWireError(
+                f"desec {method} -> HTTP {e.code}: {detail}") from None
+        except (urllib.error.URLError, TimeoutError) as e:
+            raise FyrWireError(f"desec unreachable: {e}") from None
+        except json.JSONDecodeError as e:
+            raise FyrWireError(f"desec returned unparseable JSON: {e}") from None
+
+    def minimum_ttl(self) -> int:
+        if self._minimum_ttl is None:
+            dom = self._call("GET", self._url("domains", self.domain))
+            if not dom:
+                raise FyrWireError(
+                    f"desec does not have a domain named {self.domain!r} on this "
+                    f"account — check the name, or add it at desec.io first")
+            self._minimum_ttl = int(dom.get("minimum_ttl", 3600))
+        return self._minimum_ttl
+
+    def _check_ttl(self, ttl: int) -> None:
+        floor = self.minimum_ttl()
+        if ttl < floor:
+            raise FyrWireError(
+                f"desec enforces a minimum TTL of {floor}s on {self.domain}, but "
+                f"this node asks for {ttl}s.\n"
+                f"  A {floor}s TTL means clients can cache a stale port for that "
+                f"long after a rotation.\n"
+                f"  Either set the node's ttl to {floor}, or ask deSEC support for "
+                f"a lower-TTL exception (they grant them on request).")
+
+    def _subname(self, name: str) -> str:
+        n = name.strip(".").lower()
+        if n == self.domain:
+            return ""
+        suffix = "." + self.domain
+        if not n.endswith(suffix):
+            raise FyrWireError(
+                f"{name!r} is not inside {self.domain!r} — the desec provider is "
+                f"scoped to one domain, so it cannot write that name")
+        return n[: -len(suffix)]
+
+    def _read(self, rtype: str, name: str) -> dict | None:
+        sub = self._subname(name)
+        return self._call(
+            "GET", self._url("domains", self.domain, "rrsets", sub or "@", rtype))
+
+    def _write(self, rrsets: list[dict]) -> None:
+        if not rrsets:
+            return
+        self._call("PATCH", self._url("domains", self.domain, "rrsets"), rrsets)
+
+    @staticmethod
+    def _same(existing: dict | None, records: list[str], ttl: int) -> bool:
+        if not existing:
+            return False
+        if int(existing.get("ttl", -1)) != int(ttl):
+            return False
+        return (sorted(r.lower() for r in existing.get("records", []))
+                == sorted(r.lower() for r in records))
+
+    def _ensure(self, rtype: str, name: str, records: list[str],
+                ttl: int) -> str | None:
+        self._check_ttl(ttl)
+        existing = self._read(rtype, name)
+        if self._same(existing, records, ttl):
+            return None
+        verb = "updated" if existing else "created"
+        self._write([{"subname": self._subname(name), "type": rtype,
+                      "ttl": int(ttl), "records": records}])
+        return f"{verb} {rtype} {name}"
+
+    def ensure_a(self, name: str, ip: str, ttl: int) -> str | None:
+        what = self._ensure("A", name, [ip], ttl)
+        return f"{what} -> {ip}" if what else None
+
+    def ensure_srv(self, rec: SrvRecordData) -> str | None:
+        value = f"{rec.priority} {rec.weight} {rec.port} {rec.target.rstrip('.')}."
+        what = self._ensure("SRV", rec.name, [value], rec.ttl)
+        return f"{what} -> {rec.value}" if what else None
+
+    def ensure_https(self, rec: HttpsRecordData) -> str | None:
+        value = (f"{rec.priority} {rec.target.rstrip('.')}. "
+                 f"port={rec.port}")
+        what = self._ensure("HTTPS", rec.name, [value], rec.ttl)
+        return f"{what} -> {rec.value}" if what else None
+
+    def delete(self, rtype: str, name: str, expect: str | None = None) -> str | None:
+        if expect is None:
+            raise FyrWireError(
+                f"refusing to delete {rtype} {name} on desec without an ownership "
+                f"witness — desec has no record metadata, so the only safe proof "
+                f"is that the record points where FyrWire published")
+        existing = self._read(rtype, name)
+        if not existing or not existing.get("records"):
+            return None
+        want = expect.rstrip(".").lower()
+        for value in existing["records"]:
+            if want in [f.rstrip(".").lower() for f in str(value).split()]:
+                break
+        else:
+            raise FyrWireError(
+                f"{rtype} {name} does not point at {expect!r} — refusing to "
+                f"delete a record that is not ours")
+        sub = self._subname(name)
+        self._call("DELETE",
+                   self._url("domains", self.domain, "rrsets", sub or "@", rtype))
         return f"deleted {rtype} {name}"

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -288,4 +289,82 @@ func TestTheFirstWriteOfACycleIsNotDelayed(t *testing.T) {
 
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+func TestAPortIsNotPublishedWhenItsRelayCannotBind(t *testing.T) {
+
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	taken := blocker.Addr().(*net.TCPAddr).Port
+
+	src := &fakeSource{res: res("1.2.3.4", map[string]int{"mc": taken})}
+	prov := &fakeProvider{}
+	a := New(src, prov, plan(), filepath.Join(t.TempDir(), "s.json"),
+		OptionsData{Relay: true, BindHost: "127.0.0.1", Log: func(string) {}})
+	defer a.Shutdown()
+
+	r := a.Tick(false)
+	for _, c := range prov.srvCalls {
+		if c.Port == taken {
+			t.Errorf("published port %d for a service whose relay failed to bind",
+				taken)
+		}
+	}
+	found := false
+	for _, s := range r.Skipped {
+		if s == "mc" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a service with no working relay must be reported as skipped, "+
+			"so alerting sees it: %v", r.Skipped)
+	}
+}
+
+func TestAPortIsPublishedWhenItsRelayBinds(t *testing.T) {
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := free.Addr().(*net.TCPAddr).Port
+	free.Close()
+
+	src := &fakeSource{res: res("1.2.3.4", map[string]int{"mc": port})}
+	prov := &fakeProvider{}
+	a := New(src, prov, plan(), filepath.Join(t.TempDir(), "s.json"),
+		OptionsData{Relay: true, BindHost: "127.0.0.1", Log: func(string) {}})
+	defer a.Shutdown()
+
+	a.Tick(false)
+	if len(prov.srvCalls) != 1 || prov.srvCalls[0].Port != port {
+		t.Errorf("a working relay must publish its port: %+v", prov.srvCalls)
+	}
+}
+
+func TestAFailedRelayRecoversOnceThePortIsFree(t *testing.T) {
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taken := blocker.Addr().(*net.TCPAddr).Port
+
+	src := &fakeSource{res: res("1.2.3.4", map[string]int{"mc": taken})}
+	prov := &fakeProvider{}
+	a := New(src, prov, plan(), filepath.Join(t.TempDir(), "s.json"),
+		OptionsData{Relay: true, BindHost: "127.0.0.1", Log: func(string) {}})
+	defer a.Shutdown()
+
+	a.Tick(false)
+	if len(prov.srvCalls) != 0 {
+		t.Fatalf("should not have published: %+v", prov.srvCalls)
+	}
+	blocker.Close()
+	a.Tick(false)
+	if len(prov.srvCalls) != 1 || prov.srvCalls[0].Port != taken {
+		t.Errorf("must publish once the relay can bind: %+v", prov.srvCalls)
+	}
 }

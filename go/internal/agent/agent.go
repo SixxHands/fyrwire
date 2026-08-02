@@ -150,6 +150,21 @@ func (a *Agent) Tick(force bool) TickResult {
 	}
 	sort.Strings(skipped)
 
+	relayChanges, relayFailed := a.syncRelays(res)
+	changes = append(changes, relayChanges...)
+
+	skip := map[string]bool{}
+	for k := range res.Partial {
+		skip[k] = true
+	}
+	for key := range relayFailed {
+		if !skip[key] {
+			skip[key] = true
+			skipped = append(skipped, key)
+		}
+	}
+	sort.Strings(skipped)
+
 	if force || res.Host != a.State.LastHost {
 		what, err := a.paced(func() (string, error) {
 			return a.prov.EnsureA(a.plan.AName, res.Host, a.plan.TTL)
@@ -165,7 +180,8 @@ func (a *Agent) Tick(force bool) TickResult {
 
 	for _, svc := range a.plan.Services {
 		port, ok := res.Ports[svc.Key]
-		if !ok {
+		if !ok || skip[svc.Key] {
+
 			continue
 		}
 		if !force && a.State.LastPorts[svc.Key] == port {
@@ -203,7 +219,6 @@ func (a *Agent) Tick(force bool) TickResult {
 		a.State.LastPorts[svc.Key] = port
 	}
 
-	changes = append(changes, a.syncRelays(res)...)
 	a.alert(TickResult{OK: true, Host: res.Host, Skipped: skipped})
 
 	if len(changes) > 0 {
@@ -244,9 +259,10 @@ func (a *Agent) alert(r TickResult) {
 	a.State.AlertedDown, a.State.AlertedServices = st.Down, st.Services
 }
 
-func (a *Agent) syncRelays(res model.EndpointData) []string {
+func (a *Agent) syncRelays(res model.EndpointData) ([]string, map[string]bool) {
+	failed := map[string]bool{}
 	if a.relays == nil {
-		return nil
+		return nil, failed
 	}
 	bind := a.opt.BindHost
 	if bind == "" {
@@ -254,7 +270,7 @@ func (a *Agent) syncRelays(res model.EndpointData) []string {
 	}
 	if bind == "" {
 		a.opt.Log("relay: no tunnel address found; skipping")
-		return nil
+		return nil, failed
 	}
 	wanted := map[string]relay.BindingData{}
 	for _, svc := range a.plan.Services {
@@ -270,7 +286,14 @@ func (a *Agent) syncRelays(res model.EndpointData) []string {
 			TargetHost: a.opt.TargetHost, TargetPort: svc.InternalPort,
 			Protocol: svc.Protocol}
 	}
-	return a.relays.Sync(wanted)
+	changes := a.relays.Sync(wanted)
+	live := a.relays.Stats()
+	for key := range wanted {
+		if _, ok := live[key]; !ok {
+			failed[key] = true
+		}
+	}
+	return changes, failed
 }
 
 // Runs until canceled or maxCycles hits. Panics get caught per cycle so one weird crash does not silently kill the daemon.

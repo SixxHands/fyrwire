@@ -1802,3 +1802,70 @@ class TestGatewayHonesty(unittest.TestCase):
                                "after a gateway restart the mapping is gone, so "
                                "the record must be re-created even though the "
                                "port is identical")
+
+
+class TestRelayBlocksPublish(unittest.TestCase):
+
+    def test_a_port_is_not_published_when_its_relay_cannot_bind(self):
+        blocker = socket.socket()
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        taken = blocker.getsockname()[1]
+        self.addCleanup(blocker.close)
+
+        src = FakeSource(EndpointData("1.2.3.4", {"minecraft": taken}))
+        prov = FakeProvider()
+        with tempfile.TemporaryDirectory() as d:
+            a = Agent(src, prov, plan(MC), os.path.join(d, "s.json"),
+                      relay=True, bind_host="127.0.0.1", log=lambda *_: None)
+            try:
+                report = a.tick()
+            finally:
+                if a.relays:
+                    a.relays.shutdown()
+        for name, port in prov.srv_calls:
+            self.assertNotEqual(port, taken,
+                                "published a port whose relay failed to bind")
+        self.assertIn("minecraft", report.get("skipped", []),
+                      "a service with no working relay must be reported as "
+                      "skipped, so alerting sees it")
+
+    def test_a_port_is_published_when_its_relay_binds(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        free = s.getsockname()[1]
+        s.close()
+
+        src = FakeSource(EndpointData("1.2.3.4", {"minecraft": free}))
+        prov = FakeProvider()
+        with tempfile.TemporaryDirectory() as d:
+            a = Agent(src, prov, plan(MC), os.path.join(d, "s.json"),
+                      relay=True, bind_host="127.0.0.1", log=lambda *_: None)
+            try:
+                a.tick()
+            finally:
+                if a.relays:
+                    a.relays.shutdown()
+        self.assertEqual([p for _, p in prov.srv_calls], [free])
+
+    def test_the_resolution_handed_in_is_not_mutated(self):
+        blocker = socket.socket()
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        taken = blocker.getsockname()[1]
+        self.addCleanup(blocker.close)
+
+        src = FakeSource(EndpointData("1.2.3.4", {"minecraft": taken}))
+        with tempfile.TemporaryDirectory() as d:
+            a = Agent(src, FakeProvider(), plan(MC), os.path.join(d, "s.json"),
+                      relay=True, bind_host="127.0.0.1", log=lambda *_: None)
+            try:
+                shared = src.results[0]
+                before = set(shared.partial)
+                a.tick()
+                after = set(shared.partial)
+            finally:
+                if a.relays:
+                    a.relays.shutdown()
+        self.assertEqual(before, after,
+                         "the agent poisoned the source's own Resolution")

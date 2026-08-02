@@ -77,6 +77,33 @@ class Agent:
         finally:
             self._last_write = time.monotonic()
 
+    def _sync_relays(self, res) -> tuple[list[str], set[str]]:
+        failed: set[str] = set()
+        if self.relays is None:
+            return [], failed
+        bind = self.bind_host or tunnel_address()
+        if not bind:
+            self.log("relay: no tunnel address found; skipping")
+            return [], failed
+
+        wanted = {}
+        for svc in self.plan.services:
+            port = res.ports.get(svc.key)
+            if port is None:
+                continue
+            proto = svc.protocol.lower()
+            if proto == "udp" and not self.relay_udp:
+                continue
+            wanted[svc.key] = (bind, port, self.target_host,
+                               svc.internal_port, proto)
+
+        changes = list(self.relays.sync(wanted))
+        live = self.relays.stats()
+        for key in wanted:
+            if key not in live:
+                failed.add(key)
+        return changes, failed
+
     def tick(self, force: bool = False) -> dict:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
@@ -100,7 +127,12 @@ class Agent:
             force = True
 
         changes: list[str] = []
-        skipped = sorted(res.partial)
+        skip = set(res.partial)
+
+        relay_changes, relay_failed = self._sync_relays(res)
+        changes.extend(relay_changes)
+        skip |= relay_failed
+        skipped = sorted(skip)
         self._last_write = 0.0
 
         if force or res.host != self.state.last_host:
@@ -112,7 +144,7 @@ class Agent:
 
         for svc in self.plan.services:
             port = res.ports.get(svc.key)
-            if port is None:
+            if port is None or svc.key in skip:
                 continue
             prev = self.state.last_ports.get(svc.key)
             if not force and prev == port:
@@ -134,23 +166,6 @@ class Agent:
                 changes.append(f"[{svc.key}] {c}")
             self.state.last_ports[svc.key] = port
 
-        if self.relays is not None:
-            bind = self.bind_host or tunnel_address()
-            if not bind:
-                self.log("relay: no tunnel address found; skipping")
-            else:
-                wanted = {}
-                for svc in self.plan.services:
-                    port = res.ports.get(svc.key)
-                    if port is None:
-                        continue
-                    proto = svc.protocol.lower()
-                    if proto == "udp" and not self.relay_udp:
-                        continue
-                    wanted[svc.key] = (bind, port, self.target_host,
-                                       svc.internal_port, proto)
-                for c in self.relays.sync(wanted):
-                    changes.append(c)
 
         if changes:
             self.state.total_publishes += 1

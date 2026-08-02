@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
 import tomllib
 import unittest
+from unittest import mock
 
 from fyrwire.agent import Agent, AgentState
 from fyrwire import config as config_mod
@@ -1080,3 +1082,164 @@ class TestConfigSchema(unittest.TestCase):
     def test_starter_config_passes_its_own_validator(self):
         from fyrwire import cli
         self.load(cli.STARTER)
+
+
+def _clean_env(**extra):
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("XDG_", "FYRWIRE_", "APPDATA", "LOCALAPPDATA"))}
+    env.update(extra)
+    return env
+
+
+class TestPlatformPaths(unittest.TestCase):
+    def under(self, system, **env):
+        from fyrwire import paths
+        return mock.patch("platform.system", return_value=system), \
+            mock.patch.dict(os.environ, _clean_env(**env), clear=True), paths
+
+    def test_linux_uses_xdg_layout(self):
+        sysp, envp, paths = self.under("Linux")
+        with sysp, envp:
+            self.assertTrue(paths.config_file().endswith(
+                "/.config/fyrwire/fyrwire.toml"))
+            self.assertTrue(paths.state_file().endswith(
+                "/.local/state/fyrwire/state.json"))
+
+    def test_macos_uses_application_support(self):
+        sysp, envp, paths = self.under("Darwin")
+        with sysp, envp:
+            self.assertIn("Library/Application Support/FyrWire",
+                          paths.config_file())
+
+    def test_windows_config_roams_but_state_does_not(self):
+        sysp, envp, paths = self.under(
+            "Windows", APPDATA=r"C:\U\AppData\Roaming",
+            LOCALAPPDATA=r"C:\U\AppData\Local")
+        with sysp, envp:
+            self.assertIn("Roaming", paths.config_file())
+            self.assertIn("Local", paths.state_file())
+            self.assertNotIn("Roaming", paths.state_file())
+
+    def test_windows_falls_back_when_appdata_is_unset(self):
+        sysp, envp, paths = self.under("Windows")
+        with sysp, envp:
+            self.assertIn("AppData", paths.config_file())
+
+    def test_an_explicit_xdg_setting_wins_on_every_platform(self):
+        for system in ("Linux", "Darwin", "Windows"):
+            sysp, envp, paths = self.under(system, XDG_CONFIG_HOME="/custom")
+            with sysp, envp:
+                self.assertEqual(paths.config_file(),
+                                 "/custom/fyrwire/fyrwire.toml", system)
+
+    def test_explicit_env_overrides_beat_everything(self):
+        sysp, envp, paths = self.under("Linux", FYRWIRE_CONFIG="/exact/path.toml")
+        with sysp, envp:
+            self.assertEqual(paths.config_file(), "/exact/path.toml")
+
+    def test_legacy_locations_are_offered_for_migration_only_when_they_differ(self):
+        from fyrwire import paths
+        sysp, envp, _ = self.under("Linux")
+        with sysp, envp:
+            self.assertEqual(paths.legacy_locations(), [],
+                             "on Linux the layout is unchanged, so nothing to migrate")
+        sysp, envp, _ = self.under("Darwin")
+        with sysp, envp:
+            self.assertTrue(paths.legacy_locations(),
+                            "a macOS user upgrading has files in the old place")
+
+
+class TestPlatformHonesty(unittest.TestCase):
+
+    def test_only_linux_is_marked_verified(self):
+        from fyrwire import hostinfo
+        self.assertTrue(hostinfo.LinuxBackend.verified)
+        for cls in (hostinfo.MacBackend, hostinfo.WindowsBackend,
+                    hostinfo.FallbackBackend):
+            self.assertFalse(cls.verified, cls.__name__)
+
+    def test_unverified_backends_say_so_in_health(self):
+        from fyrwire import hostinfo
+        ok, why = hostinfo.MacBackend().health()
+        self.assertTrue(ok, "unverified is not the same as broken")
+        self.assertIn("never been run", why)
+
+    def test_unknown_platform_explains_what_still_works(self):
+        from fyrwire import hostinfo
+        ok, why = hostinfo.FallbackBackend().health()
+        self.assertFalse(ok)
+        self.assertIn("manually", why)
+
+    def test_backend_selection_covers_every_platform_name(self):
+        from fyrwire import hostinfo
+        for system, want in [("Linux", "linux"), ("Darwin", "macos"),
+                             ("Windows", "windows"), ("Haiku", "unknown")]:
+            with mock.patch("platform.system", return_value=system):
+                self.assertEqual(hostinfo.backend().name, want)
+
+    def test_local_address_toward_sends_no_packets_and_still_answers(self):
+        from fyrwire import hostinfo
+        addr = hostinfo.local_address_toward("1.1.1.1")
+        self.assertIsNotNone(addr)
+        self.assertEqual(len(addr.split(".")), 4)
+
+
+class TestServiceInstallers(unittest.TestCase):
+    CFG = "/home/u/.config/fyrwire/fyrwire.toml"
+
+    def test_systemd_unit_survives_a_space_in_the_path(self):
+        from fyrwire import install
+        line = [l for l in install.systemd_unit("/home/a b/cfg.toml").splitlines()
+                if l.startswith("ExecStart")][0]
+        self.assertIn('"/home/a b/cfg.toml"', line)
+
+    def test_systemd_unit_escapes_percent(self):
+        from fyrwire import install
+        line = [l for l in install.systemd_unit("/home/50%/x.toml").splitlines()
+                if l.startswith("ExecStart")][0]
+        self.assertIn("50%%", line)
+
+    def test_systemd_unit_does_not_embed_the_token(self):
+        from fyrwire import install
+        unit = install.systemd_unit(self.CFG)
+        self.assertIn("EnvironmentFile", unit)
+        self.assertNotIn("FYRWIRE_CF_TOKEN=sk", unit)
+
+    def test_launchd_plist_is_well_formed_xml(self):
+        from fyrwire import install
+        import xml.dom.minidom
+        doc = xml.dom.minidom.parseString(install.launchd_plist(self.CFG))
+        self.assertEqual(doc.documentElement.tagName, "plist")
+
+    def test_launchd_plist_escapes_xml_metacharacters(self):
+        from fyrwire import install
+        import xml.dom.minidom
+        doc = xml.dom.minidom.parseString(
+            install.launchd_plist("/home/a&b/<c>.toml"))
+        strings = [n.firstChild.data for n in doc.getElementsByTagName("string")
+                   if n.firstChild]
+        self.assertIn("/home/a&b/<c>.toml", strings)
+
+    def test_schtasks_passes_the_command_as_one_argument(self):
+        from fyrwire import install
+        cmd = install.schtasks_command(r"C:\Users\a b\cfg.toml")
+        i = cmd.index("/TR")
+        self.assertIn("fyrwire", cmd[i + 1])
+        self.assertIn('"C:\\Users\\a b\\cfg.toml"', cmd[i + 1])
+
+    def test_schtasks_registers_a_logon_task_not_a_system_service(self):
+        from fyrwire import install
+        cmd = install.schtasks_command(self.CFG)
+        self.assertIn("ONLOGON", cmd)
+        self.assertNotIn("/RU", cmd)
+
+    def test_launcher_uses_the_running_interpreter(self):
+        from fyrwire import install
+        self.assertEqual(install._launcher(self.CFG)[0], sys.executable)
+
+    def test_unknown_platform_refuses_to_install_but_says_what_works(self):
+        from fyrwire import install
+        with mock.patch("platform.system", return_value="Haiku"):
+            with self.assertRaises(FyrWireError) as cm:
+                install.install(self.CFG)
+        self.assertIn("still runs", str(cm.exception))

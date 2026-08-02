@@ -46,6 +46,8 @@ def subnet_router(address: str, host: int = 1) -> str | None:
 
 class IHostBackend(ABC):
     name = "?"
+    verified = False
+    requires: tuple[str, ...] = ()
 
     @abstractmethod
     def listening_ports(self) -> list[tuple[int, str]]:
@@ -56,6 +58,25 @@ class IHostBackend(ABC):
 
     def unsupported_reason(self) -> str:
         return ""
+
+    def health(self) -> tuple[bool, str]:
+        reason = self.unsupported_reason()
+        if reason:
+            return False, reason
+        missing = [t for t in self.requires if not _which(t)]
+        if missing and not self.listening_ports():
+            return False, (f"cannot list listening ports: "
+                           f"{', '.join(missing)} not found on PATH")
+        if not self.verified:
+            return True, (f"the {self.name} backend has never been run on "
+                          f"{self.name} by its authors — it is written from "
+                          f"documented output formats and may be wrong")
+        return True, ""
+
+
+def _which(name: str) -> str | None:
+    import shutil
+    return shutil.which(name)
 
 
 def _run(cmd: list[str], timeout: int = 6) -> str:
@@ -68,6 +89,8 @@ def _run(cmd: list[str], timeout: int = 6) -> str:
 
 class LinuxBackend(IHostBackend):
     name = "linux"
+    verified = True
+    requires = ()
 
     def listening_ports(self) -> list[tuple[int, str]]:
         found: dict[int, str] = {}
@@ -113,6 +136,8 @@ class LinuxBackend(IHostBackend):
 
 class MacBackend(IHostBackend):
     name = "macos"
+    verified = False
+    requires = ("lsof",)
 
     def listening_ports(self) -> list[tuple[int, str]]:
         found: dict[int, str] = {}
@@ -148,6 +173,8 @@ class MacBackend(IHostBackend):
 
 class WindowsBackend(IHostBackend):
     name = "windows"
+    verified = False
+    requires = ("netstat",)
 
     def listening_ports(self) -> list[tuple[int, str]]:
         found: dict[int, str] = {}
@@ -177,13 +204,15 @@ class WindowsBackend(IHostBackend):
 
 class FallbackBackend(IHostBackend):
     name = "unknown"
+    verified = False
 
     def listening_ports(self) -> list[tuple[int, str]]:
         return []
 
     def unsupported_reason(self) -> str:
-        return (f"no listening-port backend for {platform.system() or 'this OS'}; "
-                f"enter ports manually")
+        return (f"no listening-port backend for {platform.system() or 'this OS'}. "
+                f"Everything else still works — port detection is a convenience, "
+                f"not a dependency — so enter ports manually and carry on.")
 
 
 _BACKENDS = {"Linux": LinuxBackend, "Darwin": MacBackend, "Windows": WindowsBackend}

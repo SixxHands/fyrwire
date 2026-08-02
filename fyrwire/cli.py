@@ -5,7 +5,8 @@ import json
 import os
 import sys
 
-from . import banner, config, notify, providers, sources, tui, setup
+from . import (banner, config, install as install_mod, notify, paths,
+               providers, sources, tui, setup)
 from .agent import Agent
 from .models import FyrWireError, NodePlanData, Service
 
@@ -14,20 +15,20 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
-DEFAULT_CONFIG = os.environ.get(
-    "FYRWIRE_CONFIG",
-    os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-                 "fyrwire", "fyrwire.toml"),
-)
-DEFAULT_STATE = os.path.join(
-    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
-    "fyrwire", "state.json",
-)
+DEFAULT_CONFIG = paths.config_file()
+DEFAULT_STATE = paths.state_file()
 
 
 def load_config(path: str, resolve_secrets: bool = True) -> dict:
     if not os.path.exists(path):
-        raise FyrWireError(f"no config at {path} — run `fyrwire init` to write a starter")
+        hint = ""
+        for old, new_ in paths.legacy_locations():
+            if os.path.exists(old) and new_ == path:
+                hint = (f"\n  There IS one at {old}, where older versions kept "
+                        f"it.\n  Move it to the path above, or set "
+                        f"FYRWIRE_CONFIG={old}")
+        raise FyrWireError(
+            f"no config at {path} — run `fyrwire init` to write a starter{hint}")
     with open(path, "rb") as fh:
         try:
             cfg = tomllib.load(fh)
@@ -176,14 +177,28 @@ def cmd_setup(args) -> int:
 
 
 def cmd_install(args) -> int:
-    return setup.install(args.config)
+    return install_mod.install(args.config)
+
+
+def cmd_uninstall(args) -> int:
+    return install_mod.uninstall(args.config)
 
 
 def cmd_doctor(args) -> int:
-    from . import detect
+    from . import detect, hostinfo
     cfg = load_config(args.config, resolve_secrets=False)
     plan = build_plan(cfg)
     ok = True
+
+    print(f"  {'config':<24} {args.config}")
+    print(f"  {'state':<24} {getattr(args, 'state', DEFAULT_STATE)}")
+    hb = hostinfo.backend()
+    healthy, why = hb.health()
+    print(f"  platform                 {hb.name}"
+          + ("" if healthy else "  LIMITED"))
+    if why:
+        print(f"    {why}")
+
 
     src = cfg["source"]
     if src.get("type") == "natpmp":
@@ -453,8 +468,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("init", help="write a starter config"); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_init)
     p = sub.add_parser("setup", help="guided first-run setup")
     p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_setup)
-    p = sub.add_parser("install", help="run it in the background (systemd user unit)")
+    p = sub.add_parser("install",
+                       help="run it in the background (systemd / launchd / Task Scheduler)")
     p.set_defaults(fn=cmd_install)
+    p = sub.add_parser("uninstall", help="stop running it in the background")
+    p.set_defaults(fn=cmd_uninstall)
     p = sub.add_parser("add", help="add a service to an existing config")
     p.set_defaults(fn=cmd_add)
     p = sub.add_parser("remove", help="remove a service and its DNS record")

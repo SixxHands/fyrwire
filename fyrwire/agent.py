@@ -43,7 +43,9 @@ class AgentState:
 # Never wipe DNS on a bad cycle. A VPN blip should leave the last working port alone instead of taking everything down.
 class Agent:
     def __init__(self, source, provider, plan: NodePlanData, state_path: str, log=print,
-                 relay: bool = False, bind_host: str | None = None,
+                 relay: bool = False, relay_udp: bool = False,
+                 udp_options: dict | None = None,
+                 bind_host: str | None = None,
                  target_host: str = "127.0.0.1", notifier=None):
         self.source = source
         self.provider = provider
@@ -53,7 +55,9 @@ class Agent:
         self.log = log
         self.target_host = target_host
         self.bind_host = bind_host
-        self.relays = RelayManager(log=log) if relay else None
+        self.relay_udp = relay_udp
+        self.relays = (RelayManager(log=log, udp_options=udp_options)
+                       if relay else None)
         self.notifier = notifier
 
     def tick(self, force: bool = False) -> dict:
@@ -116,9 +120,13 @@ class Agent:
                 wanted = {}
                 for svc in self.plan.services:
                     port = res.ports.get(svc.key)
-                    if port is None or svc.protocol.lower() != "tcp":
+                    if port is None:
                         continue
-                    wanted[svc.key] = (bind, port, self.target_host, svc.internal_port)
+                    proto = svc.protocol.lower()
+                    if proto == "udp" and not self.relay_udp:
+                        continue
+                    wanted[svc.key] = (bind, port, self.target_host,
+                                       svc.internal_port, proto)
                 for c in self.relays.sync(wanted):
                     changes.append(c)
 

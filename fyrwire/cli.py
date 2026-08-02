@@ -81,6 +81,22 @@ def build_plan(cfg: dict) -> NodePlanData:
                     ttl=int(node.get("ttl", 60)))
 
 
+_UDP_KEYS = {"idle_new": int, "idle_established": int, "max_sessions": int,
+             "max_per_ip": int, "new_per_sec": float, "reap_interval": float,
+             "drop_zero_length": bool}
+
+
+def _udp_options(raw: dict) -> dict:
+    out = {}
+    for k, v in raw.items():
+        if k not in _UDP_KEYS:
+            raise FyrWireError(
+                f"unknown option node.udp.{k}; valid: "
+                f"{', '.join(sorted(_UDP_KEYS))}")
+        out[k] = _UDP_KEYS[k](v)
+    return out
+
+
 def build_agent(cfg: dict, state_path: str, log=print) -> Agent:
     s = dict(cfg["source"])
     p = dict(cfg["provider"])
@@ -90,6 +106,8 @@ def build_agent(cfg: dict, state_path: str, log=print) -> Agent:
     return Agent(src, prov, build_plan(cfg), state_path, log=log,
                  notifier=notify.from_config(cfg, log=log),
                  relay=bool(node.get("relay", False)),
+                 relay_udp=bool(node.get("relay_udp", False)),
+                 udp_options=_udp_options(node.get("udp") or {}),
                  bind_host=node.get("bind_host"),
                  target_host=node.get("target_host", "127.0.0.1"))
 
@@ -115,6 +133,29 @@ zone_id   = "env:FYRWIRE_CF_ZONE"
 # the address is published once and cannot disagree with itself.
 a_name = "node.example.com"
 ttl    = 60
+
+# Bind the granted port locally and forward it to the service. Without this,
+# DNS sends clients to the right address and port and nothing is listening
+# there.
+# relay     = true
+#
+# UDP relaying is OPT-IN, and deliberately so. Any UDP relay forwards the
+# backend's reply to a source address that is trivially spoofable, which makes
+# it an open reflector by construction. FyrWire caps sessions, caps sessions
+# per source IP and rate-limits new sessions, but those are mitigations, not a
+# fix. Also note the backend will see every client as 127.0.0.1: preserving
+# real source IPs needs root, so server-side IP bans, per-IP limits and
+# client-IP logs stop meaning anything behind the relay.
+# relay_udp = false
+#
+# [node.udp]
+# idle_new            = 30    # seconds before an unanswered session is dropped
+# idle_established    = 180   # seconds once the backend has replied
+# max_sessions        = 512
+# max_per_ip          = 8
+# new_per_sec         = 32
+# reap_interval       = 5
+# drop_zero_length    = true  # makes a port scan cost nothing
 
 # One [[service]] per thing you expose. Each gets its own forwarded port and
 # its own SRV record; they share the A record above.
@@ -253,8 +294,14 @@ def cmd_check(args) -> int:
                 continue
             for ip in ips:
                 if svc.protocol.lower() != "tcp":
-                    print(f"    A    {target} -> {ip}   "
-                          f"(UDP: cannot be probed by connecting)")
+                    node = cfg.get("node", {})
+                    if node.get("relay") and node.get("relay_udp"):
+                        state = "relaying, but reachability is unprovable here"
+                    elif node.get("relay"):
+                        state = "NOT relayed — set node.relay_udp = true"
+                    else:
+                        state = "no relay configured"
+                    print(f"    A    {target} -> {ip}   (UDP: {state})")
                     continue
                 good, why = dns.reachable(ip, port, args.timeout)
                 print(f"    TCP  {ip}:{port}  " +

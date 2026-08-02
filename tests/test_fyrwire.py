@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import tempfile
 import threading
+import time
 import unittest
 
 from fyrwire.agent import Agent, AgentState
@@ -670,3 +672,297 @@ class TestOwnershipWitness(unittest.TestCase):
         for name in providers.available():
             sig = inspect.signature(providers._REGISTRY[name].delete)
             self.assertIn("expect", sig.parameters, name)
+
+
+class _FakeTime:
+
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+def udp_echo_backend(tag: bytes):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    seen = []
+
+    def serve():
+        while True:
+            try:
+                data, addr = s.recvfrom(65535)
+            except OSError:
+                return
+            seen.append(addr)
+            try:
+                s.sendto(tag + b":" + data, addr)
+            except OSError:
+                return
+
+    threading.Thread(target=serve, daemon=True).start()
+    return port, seen, s
+
+
+def udp_roundtrip(port: int, payload: bytes, timeout=2.0):
+    c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    c.settimeout(timeout)
+    try:
+        c.connect(("127.0.0.1", port))
+        c.send(payload)
+        return c.recv(65535)
+    finally:
+        c.close()
+
+
+class TestUdpRelay(unittest.TestCase):
+    def setUp(self):
+        self.mgr = RelayManager()
+        self.closers = []
+
+    def tearDown(self):
+        self.mgr.shutdown()
+        for s in self.closers:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    def backend(self, tag=b"BE"):
+        port, seen, sock = udp_echo_backend(tag)
+        self.closers.append(sock)
+        return port, seen
+
+    def test_datagram_round_trips(self):
+        be, _ = self.backend(b"one")
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        self.assertEqual(udp_roundtrip(front, b"hello"), b"one:hello")
+
+    def test_two_clients_get_separate_upstream_sockets(self):
+        be, seen = self.backend(b"x")
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        self.assertEqual(udp_roundtrip(front, b"aaa"), b"x:aaa")
+        self.assertEqual(udp_roundtrip(front, b"bbb"), b"x:bbb")
+        self.assertEqual(len({p for _, p in seen}), 2,
+                         "each client must reach the backend from its own port")
+
+    def test_reply_is_accepted_by_a_connected_client(self):
+        be, _ = self.backend(b"src")
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        self.assertEqual(udp_roundtrip(front, b"q"), b"src:q")
+
+    def test_back_to_back_datagrams_open_exactly_one_session(self):
+        be, seen = self.backend(b"r")
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        c.connect(("127.0.0.1", front))
+        c.send(b"1")
+        c.send(b"2")
+        c.settimeout(2.0)
+        c.recv(65535)
+        c.recv(65535)
+        c.close()
+        self.assertEqual(len({p for _, p in seen}), 1,
+                         "one client must not open two upstream sockets")
+
+    def test_unchanged_listener_is_not_rebound(self):
+        be, _ = self.backend()
+        front = free_port()
+        spec = {"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")}
+        self.mgr.sync(spec)
+        self.assertEqual(self.mgr.sync(spec), [],
+                         "a rebind would destroy every live session")
+
+    def test_protocol_change_forces_a_rebind(self):
+        be, _ = self.backend()
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        changes = self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "tcp")})
+        self.assertTrue(changes, "protocol must be part of the signature")
+        self.assertEqual(self.mgr.stats()["a"]["proto"], "tcp")
+
+    def test_stop_releases_the_fd_before_it_returns(self):
+        from fyrwire.relay import _UdpListener
+        be, _ = self.backend(b"z")
+        front = free_port()
+
+        async def scenario():
+            first = _UdpListener("a", "127.0.0.1", front, "127.0.0.1", be)
+            await first.start()
+            await first.stop()
+            second = _UdpListener("a", "127.0.0.1", front, "127.0.0.1", be)
+            await second.start()
+            await second.stop()
+
+        asyncio.run(scenario())
+
+    def test_rotation_through_the_manager_rebinds_and_still_serves(self):
+        be, _ = self.backend(b"z")
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        self.mgr.sync({})
+        changes = self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        self.assertTrue(any("FAILED" not in c for c in changes), changes)
+        self.assertEqual(udp_roundtrip(front, b"again"), b"z:again")
+
+    def test_rotating_one_port_leaves_the_other_alone(self):
+        be1, _ = self.backend(b"p")
+        be2, _ = self.backend(b"q")
+        f1, f2 = free_port(), free_port()
+        self.mgr.sync({"a": ("127.0.0.1", f1, "127.0.0.1", be1, "udp"),
+                       "b": ("127.0.0.1", f2, "127.0.0.1", be2, "udp")})
+        f1b = free_port()
+        changes = self.mgr.sync({"a": ("127.0.0.1", f1b, "127.0.0.1", be1, "udp"),
+                                 "b": ("127.0.0.1", f2, "127.0.0.1", be2, "udp")})
+        self.assertEqual(len(changes), 1, changes)
+        self.assertEqual(udp_roundtrip(f2, b"still"), b"q:still")
+
+    def test_removal_stops_listening(self):
+        be, _ = self.backend()
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        self.mgr.sync({})
+        self.assertNotIn("a", self.mgr.stats())
+        with self.assertRaises((socket.timeout, TimeoutError, ConnectionError, OSError)):
+            udp_roundtrip(front, b"anyone", timeout=0.4)
+
+    def test_zero_length_datagram_creates_no_session(self):
+        be, seen = self.backend()
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        c.sendto(b"", ("127.0.0.1", front))
+        c.close()
+        lis = self.mgr._listeners["a"]
+        for _ in range(20):
+            if lis.total:
+                break
+            time.sleep(0.02)
+        self.assertEqual(lis.total, 0)
+        self.assertEqual(seen, [])
+
+    def test_max_datagram_round_trips_without_truncation(self):
+        be, _ = self.backend(b"big")
+        front = free_port()
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
+        payload = b"y" * (65507 - 4)
+        self.assertEqual(udp_roundtrip(front, payload, timeout=4.0),
+                         b"big:" + payload)
+
+    def test_stats_shape_for_both_protocols(self):
+        be, _ = self.backend()
+        tcp_be = echo_backend(b"t")
+        f1, f2 = free_port(), free_port()
+        self.mgr.sync({"u": ("127.0.0.1", f1, "127.0.0.1", be, "udp"),
+                       "t": ("127.0.0.1", f2, "127.0.0.1", tcp_be, "tcp")})
+        st = self.mgr.stats()
+        self.assertEqual(st["u"]["proto"], "udp")
+        self.assertEqual(st["t"]["proto"], "tcp")
+        self.assertIn("sessions", st["u"])
+        self.assertIn("active", st["t"])
+
+    def test_bind_failure_on_one_key_spares_the_others(self):
+        be, _ = self.backend(b"ok")
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        blocker.bind(("127.0.0.1", 0))
+        taken = blocker.getsockname()[1]
+        self.closers.append(blocker)
+        good = free_port()
+        changes = self.mgr.sync({
+            "bad": ("127.0.0.1", taken, "127.0.0.1", be, "udp"),
+            "good": ("127.0.0.1", good, "127.0.0.1", be, "udp")})
+        self.assertTrue(any("FAILED" in c for c in changes), changes)
+        self.assertNotIn("bad", self.mgr.stats())
+        self.assertEqual(udp_roundtrip(good, b"fine"), b"ok:fine")
+
+
+class TestUdpSessionPolicy(unittest.TestCase):
+
+    def _listener(self, **kw):
+        from fyrwire.relay import _UdpListener
+        clock = _FakeTime()
+        lis = _UdpListener("k", "127.0.0.1", 1, "127.0.0.1", 2,
+                           now=clock, **kw)
+        lis.backend = ("127.0.0.1", 2)
+        lis.loop = None
+        return lis, clock
+
+    def _fake_session(self, lis, addr):
+        from fyrwire.relay import _UdpSession
+        s = _UdpSession(client=addr, sock=socket.socket(socket.AF_INET,
+                                                       socket.SOCK_DGRAM),
+                        last_rx=lis.now(), last_tx=lis.now())
+        lis.sessions[addr] = s
+        lis.per_ip[addr[0]] = lis.per_ip.get(addr[0], 0) + 1
+        lis.total += 1
+        return s
+
+    def test_unreplied_session_expires_on_the_short_timer(self):
+        lis, clock = self._listener()
+        self._fake_session(lis, ("1.2.3.4", 5000))
+        clock.advance(31)
+        self.assertEqual(lis.reap_once(), 1)
+
+    def test_replied_session_survives_the_short_timer(self):
+        lis, clock = self._listener()
+        s = self._fake_session(lis, ("1.2.3.4", 5000))
+        s.replied = True
+        clock.advance(31)
+        self.assertEqual(lis.reap_once(), 0)
+        clock.advance(181)
+        self.assertEqual(lis.reap_once(), 1)
+
+    def test_backend_only_traffic_keeps_a_session_alive(self):
+        lis, clock = self._listener()
+        s = self._fake_session(lis, ("1.2.3.4", 5000))
+        s.replied = True
+        for _ in range(10):
+            clock.advance(60)
+            s.last_tx = clock()
+            self.assertEqual(lis.reap_once(), 0)
+
+    def test_session_table_cap_drops_rather_than_queues(self):
+        lis, _ = self._listener(max_sessions=2)
+        lis.max_sessions = 2
+        for i in range(2):
+            self._fake_session(lis, ("1.2.3.4", 5000 + i))
+        lis.on_client(b"x", ("1.2.3.4", 9999))
+        self.assertEqual(len(lis.sessions), 2)
+        self.assertEqual(lis.dropped, 1)
+
+    def test_per_ip_cap_stops_one_source_taking_the_table(self):
+        lis, _ = self._listener(max_per_ip=2)
+        for i in range(2):
+            self._fake_session(lis, ("9.9.9.9", 6000 + i))
+        lis.on_client(b"x", ("9.9.9.9", 7000))
+        self.assertEqual(lis.dropped, 1)
+        self.assertEqual(len(lis.sessions), 2)
+
+    def test_new_session_rate_limit_is_a_token_bucket(self):
+        lis, clock = self._listener(new_per_sec=2)
+        lis.max_sessions = 100
+        self.assertTrue(lis._allow_new())
+        self.assertTrue(lis._allow_new())
+        self.assertFalse(lis._allow_new(), "bucket must empty")
+        clock.advance(1.0)
+        self.assertTrue(lis._allow_new(), "and refill over time")
+
+    def test_eviction_keeps_the_per_ip_index_correct(self):
+        lis, _ = self._listener()
+        s = self._fake_session(lis, ("5.5.5.5", 1234))
+        lis._evict(s, "test")
+        self.assertNotIn("5.5.5.5", lis.per_ip)
+        self.assertEqual(lis.sessions, {})
+
+    def test_max_sessions_is_clamped_to_real_host_limits(self):
+        from fyrwire.relay import _UdpListener
+        self.assertLessEqual(_UdpListener._clamp(10 ** 9), 10 ** 9)
+        self.assertGreaterEqual(_UdpListener._clamp(10 ** 9), 1)

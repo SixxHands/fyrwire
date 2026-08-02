@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import difflib
 import inspect
+import types
+import typing
 
 from .models import FyrWireError
 
@@ -101,46 +103,78 @@ def _check_table(where: str, table: dict, spec: dict) -> None:
             raise FyrWireError(f"{where} is missing the required key {key!r}")
 
 
+_CHECKABLE = {int, float, bool, str, dict, list}
+
+
+def _resolve_annotation(ann):
+    if ann is inspect.Parameter.empty:
+        return None
+    if isinstance(ann, str):
+        text = ann.replace(" ", "")
+        base = text.split("|")[0].split("[")[0]
+        base = base.removeprefix("Optional[").removeprefix("typing.")
+        return {"int": int, "float": float, "bool": bool, "str": str,
+                "dict": dict, "list": list}.get(base)
+    origin = typing.get_origin(ann)
+    if origin is types.UnionType or origin is typing.Union:
+        for arg in typing.get_args(ann):
+            if arg is type(None):
+                continue
+            got = _resolve_annotation(arg)
+            if got is not None:
+                return got
+        return None
+    if origin is not None:
+        return origin if origin in _CHECKABLE else None
+    return ann if ann in _CHECKABLE else None
+
+
 def _class_keys(cls) -> dict:
     out = {}
     for name, p in inspect.signature(cls.__init__).parameters.items():
-        if name in ("self",) or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+        if name == "self" or p.kind is p.VAR_POSITIONAL:
             continue
-        ann = p.annotation
-        want = ann if isinstance(ann, type) else str
-        if isinstance(ann, str):
-            want = (int if ann.startswith("int") else
-                    float if ann.startswith("float") else
-                    bool if ann.startswith("bool") else
-                    dict if ann.startswith("dict") else str)
-            if "None" in ann:
-                want = object
-        out[name] = (want, p.default is inspect.Parameter.empty)
+        if p.kind is p.VAR_KEYWORD:
+            out["**"] = (None, False)
+            continue
+        out[name] = (_resolve_annotation(p.annotation),
+                     p.default is inspect.Parameter.empty)
     return out
 
 
 def _check_typed_section(where: str, table: dict, registry: dict, kind: str) -> None:
+    if not isinstance(table, dict):
+        raise FyrWireError(
+            f"[{where}] must be a table written as [{where}], not "
+            f"{type(table).__name__}")
     if "type" not in table:
         raise FyrWireError(
             f"[{where}] needs a `type` key; available: "
             f"{', '.join(sorted(registry))}")
     tname = table["type"]
+    if not isinstance(tname, str):
+        raise FyrWireError(
+            f"{where}.type must be a string naming a {kind}; available: "
+            f"{', '.join(sorted(registry))}")
     cls = registry.get(tname)
     if cls is None:
         raise FyrWireError(
             f"unknown {kind} type {tname!r}"
             f"{_suggest(tname, registry)}")
     spec = _class_keys(cls)
+    open_ended = spec.pop("**", None) is not None
     rest = {k: v for k, v in table.items() if k != "type"}
     for key, value in rest.items():
         if key not in spec:
+            if open_ended:
+                continue
             raise FyrWireError(
                 f"unknown key {where}.{key} for {kind} type "
                 f"{tname!r}{_suggest(key, spec)}")
         want = spec[key][0]
         if isinstance(value, str) and value.startswith("env:"):
             continue
-        if want is not object:
+        if want is not None:
             _check_type(where, key, value, want)
     for key, (_, required) in spec.items():
         if required and key not in rest:
@@ -155,9 +189,21 @@ def migrate(cfg: dict) -> dict:
 def validate(cfg: dict) -> dict:
     from . import providers, sources
 
-    for key in cfg:
+    if not isinstance(cfg, dict):
+        raise FyrWireError("the config must be a table of sections")
+    for key, value in cfg.items():
         if key not in SECTIONS:
             raise FyrWireError(f"unknown section [{key}]{_suggest(key, SECTIONS)}")
+        if key == "service":
+            if not isinstance(value, list):
+                raise FyrWireError(
+                    "services must be written as [[service]] (double "
+                    "brackets), one table per service")
+        elif not isinstance(value, dict):
+            raise FyrWireError(
+                f"[{key}] must be a table; got {type(value).__name__}. "
+                f"Write it as [{key}] with keys underneath, not "
+                f"{key} = ...")
 
     meta = cfg.get("fyrwire") or {}
     _check_table("fyrwire", meta, FYRWIRE_KEYS)
@@ -208,3 +254,34 @@ def validate(cfg: dict) -> dict:
         pass
 
     return cfg
+
+
+def recheck_resolved(cfg: dict) -> None:
+    from . import providers, sources
+    for where, registry in (("source", sources._REGISTRY),
+                            ("provider", providers._REGISTRY)):
+        table = cfg.get(where) or {}
+        cls = registry.get(table.get("type"))
+        if cls is None:
+            continue
+        spec = _class_keys(cls)
+        spec.pop("**", None)
+        for key, value in table.items():
+            if key == "type" or key not in spec:
+                continue
+            want = spec[key][0]
+            if want is None or want is str:
+                continue
+            if isinstance(value, str):
+                try:
+                    if want is int:
+                        int(value)
+                    elif want is float:
+                        float(value)
+                    elif want is bool and value.lower() not in (
+                            "true", "false", "1", "0", "yes", "no"):
+                        raise ValueError(value)
+                except ValueError:
+                    raise FyrWireError(
+                        f"{where}.{key} resolved to {value!r}, which is not a "
+                        f"{want.__name__}") from None

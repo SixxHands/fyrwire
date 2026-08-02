@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import socket
 import sys
@@ -9,13 +10,14 @@ import threading
 import time
 import tomllib
 import unittest
+import urllib.error
 from unittest import mock
 
 from fyrwire.agent import Agent, AgentState
 from fyrwire import config as config_mod
 from fyrwire import providers
-from fyrwire.models import (FyrWireError, NodePlanData, EndpointData, Service,
-                            SrvRecordData)
+from fyrwire.models import (FyrWireError, HttpsRecordData, NodePlanData, EndpointData,
+                            Service, SrvRecordData)
 from fyrwire.providers import CloudflareProvider
 from fyrwire.relay import RelayManager
 from fyrwire.tui import panel, vis
@@ -531,12 +533,13 @@ if __name__ == "__main__":
 
 class FakeDesec(providers.DesecProvider):
 
-    def __init__(self, **kw):
+    def __init__(self, min_ttl=60, **kw):
         existing = kw.pop("existing", {})
         super().__init__(token="t", domain="example.com", **kw)
         self.calls = []
         self.existing = existing
-        self._minimum_ttl = 60
+        self._minimum_ttl = min_ttl
+        self._min_ttl_at = time.monotonic()
 
     def _call(self, method, url, body=None):
         self.calls.append((method, url, body))
@@ -631,8 +634,7 @@ class TestDesecProvider(unittest.TestCase):
                                    expect="node.example.com"))
 
     def test_ttl_below_the_floor_is_refused_with_the_number_in_it(self):
-        p = FakeDesec()
-        p._minimum_ttl = 3600
+        p = FakeDesec(min_ttl=3600)
         with self.assertRaises(FyrWireError) as cm:
             p.ensure_a("node.example.com", "1.2.3.4", 60)
         msg = str(cm.exception)
@@ -756,11 +758,21 @@ class TestUdpRelay(unittest.TestCase):
         self.assertEqual(len({p for _, p in seen}), 2,
                          "each client must reach the backend from its own port")
 
-    def test_reply_is_accepted_by_a_connected_client(self):
+    def test_reply_source_port_is_the_granted_port(self):
         be, _ = self.backend(b"src")
         front = free_port()
         self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
-        self.assertEqual(udp_roundtrip(front, b"q"), b"src:q")
+        c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        c.settimeout(2.0)
+        try:
+            c.sendto(b"q", ("127.0.0.1", front))
+            data, addr = c.recvfrom(65535)
+        finally:
+            c.close()
+        self.assertEqual(data, b"src:q")
+        self.assertEqual(addr[1], front,
+                         "a reply from any other port is dropped by any "
+                         "client behind a NAT")
 
     def test_back_to_back_datagrams_open_exactly_one_session(self):
         be, seen = self.backend(b"r")
@@ -785,12 +797,19 @@ class TestUdpRelay(unittest.TestCase):
         self.assertEqual(self.mgr.sync(spec), [],
                          "a rebind would destroy every live session")
 
-    def test_protocol_change_forces_a_rebind(self):
+    def test_protocol_is_part_of_the_signature(self):
+        from fyrwire.relay import _Listener, _UdpListener
+        tcp = _Listener("k", "127.0.0.1", 1, "127.0.0.1", 2)
+        udp = _UdpListener("k", "127.0.0.1", 1, "127.0.0.1", 2)
+        self.assertNotEqual(tcp.signature, udp.signature)
+        self.assertIn("tcp", tcp.signature)
+        self.assertIn("udp", udp.signature)
+
+    def test_protocol_change_rebinds_the_listener(self):
         be, _ = self.backend()
         front = free_port()
         self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "udp")})
-        changes = self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "tcp")})
-        self.assertTrue(changes, "protocol must be part of the signature")
+        self.mgr.sync({"a": ("127.0.0.1", front, "127.0.0.1", be, "tcp")})
         self.assertEqual(self.mgr.stats()["a"]["proto"], "tcp")
 
     def test_stop_releases_the_fd_before_it_returns(self):
@@ -968,7 +987,8 @@ class TestUdpSessionPolicy(unittest.TestCase):
 
     def test_max_sessions_is_clamped_to_real_host_limits(self):
         from fyrwire.relay import _UdpListener
-        self.assertLessEqual(_UdpListener._clamp(10 ** 9), 10 ** 9)
+        self.assertLess(_UdpListener._clamp(10 ** 9), 10 ** 9,
+                        "the host's own limits must bound the table")
         self.assertGreaterEqual(_UdpListener._clamp(10 ** 9), 1)
 
 
@@ -1243,3 +1263,327 @@ class TestServiceInstallers(unittest.TestCase):
             with self.assertRaises(FyrWireError) as cm:
                 install.install(self.CFG)
         self.assertIn("still runs", str(cm.exception))
+
+
+class TestUdpFailureHandling(unittest.TestCase):
+
+    def setUp(self):
+        self.closers = []
+
+    def tearDown(self):
+        for s in self.closers:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    def _dead_backend(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def test_a_refused_backend_evicts_the_session_immediately(self):
+        from fyrwire.relay import _UdpListener
+        be = self._dead_backend()
+
+        async def scenario():
+            lis = _UdpListener("k", "127.0.0.1", 0, "127.0.0.1", be)
+            await lis.start()
+            port = lis.transport.get_extra_info("socket").getsockname()[1]
+            c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            c.connect(("127.0.0.1", port))
+            c.send(b"hello")
+            await asyncio.sleep(0.25)
+            c.close()
+            result = (len(lis.sessions), lis.upstream_errors)
+            await lis.stop()
+            return result
+
+        sessions, errors = asyncio.run(scenario())
+        self.assertEqual(sessions, 0, "a refused session must not linger")
+        self.assertGreaterEqual(errors, 1, "and must be counted")
+
+    def test_a_session_evicted_mid_attach_does_not_steal_the_next_fd(self):
+        from fyrwire.relay import _UdpListener
+        be = self._dead_backend()
+
+        async def scenario():
+            lis = _UdpListener("k", "127.0.0.1", 0, "127.0.0.1", be)
+            await lis.start()
+            port = lis.transport.get_extra_info("socket").getsockname()[1]
+            clients = []
+            for i in range(4):
+                c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                c.connect(("127.0.0.1", port))
+                c.send(b"a")
+                c.send(b"b")
+                clients.append(c)
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.3)
+            deaf = [s for s in lis.sessions.values()
+                    if s.transport is None and not s.attaching]
+            for c in clients:
+                c.close()
+            await lis.stop()
+            return deaf
+
+        self.assertEqual(asyncio.run(scenario()), [],
+                         "no session may survive with no transport")
+
+    def test_the_rate_limiter_is_actually_wired_into_the_datagram_path(self):
+        from fyrwire.relay import _UdpListener
+        clock = _FakeTime()
+        lis = _UdpListener("k", "127.0.0.1", 1, "127.0.0.1", 2,
+                           new_per_sec=2, now=clock)
+        lis.backend = ("127.0.0.1", 2)
+        lis.loop = None
+        lis.max_sessions = 100
+        opened = []
+        lis._open = lambda addr: opened.append(addr)
+        for i in range(5):
+            lis.on_client(b"x", ("1.2.3.4", 6000 + i))
+        self.assertEqual(len(opened), 2, "the bucket holds 2")
+        self.assertEqual(lis.dropped, 3)
+
+    def test_a_reply_for_an_evicted_session_is_dropped(self):
+        from fyrwire.relay import _UdpListener, _UdpSession
+        lis = _UdpListener("k", "127.0.0.1", 1, "127.0.0.1", 2)
+        sent = []
+        lis.transport = type("T", (), {"sendto": lambda self, d, a: sent.append(a)})()
+        stale = _UdpSession(client=("1.2.3.4", 5000),
+                            sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+        self.closers.append(stale.sock)
+        lis.on_backend(stale, b"late")
+        self.assertEqual(sent, [], "a reply for a session we dropped goes nowhere")
+
+    def test_byte_counters_are_cumulative_not_a_live_sum(self):
+        from fyrwire.relay import _UdpListener, _UdpSession
+        lis = _UdpListener("k", "127.0.0.1", 1, "127.0.0.1", 2)
+        lis.backend = ("127.0.0.1", 2)
+        lis.loop = None
+        s = _UdpSession(client=("1.2.3.4", 5000),
+                        sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+        self.closers.append(s.sock)
+        lis.sessions[s.client] = s
+        lis.c2s_bytes = 5000
+        lis._evict(s, "test")
+        self.assertEqual(lis.stats()["c2s_bytes"], 5000)
+
+    def test_send_failures_are_not_counted_as_refused_sessions(self):
+        from fyrwire.relay import _UdpListener
+        lis = _UdpListener("k", "127.0.0.1", 1, "127.0.0.1", 2)
+        st = lis.stats()
+        self.assertIn("send_dropped", st)
+        self.assertIn("sessions_dropped", st)
+        self.assertIn("listener_errors", st)
+
+    def test_stats_is_safe_while_the_session_table_churns(self):
+        from fyrwire.relay import _UdpListener, _UdpSession
+        lis = _UdpListener("k", "127.0.0.1", 1, "127.0.0.1", 2)
+        socks = []
+        stop = threading.Event()
+        errors = []
+
+        def churn():
+            i = 0
+            while not stop.is_set():
+                key = ("1.2.3.4", 5000 + (i % 64))
+                sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                socks.append(sk)
+                lis.sessions[key] = _UdpSession(client=key, sock=sk)
+                if i % 3 == 0 and lis.sessions:
+                    lis.sessions.pop(next(iter(lis.sessions)), None)
+                i += 1
+
+        t = threading.Thread(target=churn, daemon=True)
+        t.start()
+        try:
+            for _ in range(20000):
+                try:
+                    lis.stats()
+                except RuntimeError as e:
+                    errors.append(e)
+                    break
+        finally:
+            stop.set()
+            t.join(timeout=2)
+            for sk in socks:
+                try:
+                    sk.close()
+                except OSError:
+                    pass
+        self.assertEqual(errors, [], "stats() must not iterate the live table")
+
+    def test_a_failed_rebind_leaves_no_stale_listener_in_stats(self):
+        mgr = RelayManager()
+        try:
+            be = self._dead_backend()
+            first = free_port()
+            mgr.sync({"a": ("127.0.0.1", first, "127.0.0.1", be, "udp")})
+            blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            blocker.bind(("127.0.0.1", 0))
+            taken = blocker.getsockname()[1]
+            self.closers.append(blocker)
+            changes = mgr.sync({"a": ("127.0.0.1", taken, "127.0.0.1", be, "udp")})
+            self.assertTrue(any("FAILED" in c for c in changes), changes)
+            self.assertNotIn("a", mgr.stats(),
+                             "a listener that failed to rebind is not live")
+        finally:
+            mgr.shutdown()
+
+
+class TestDesecFailureHandling(unittest.TestCase):
+
+    def provider(self, responder, min_ttl=60):
+        p = providers.DesecProvider(token="t", domain="example.com")
+        p._minimum_ttl = min_ttl
+        p._min_ttl_at = time.monotonic()
+        p.calls = []
+
+        def _call(method, url, body=None):
+            p.calls.append((method, url, body))
+            return responder(method, url, body)
+
+        p._call = _call
+        return p
+
+    def test_a_404_on_a_write_is_not_reported_as_success(self):
+        p = providers.DesecProvider(token="t", domain="example.com")
+        p._minimum_ttl, p._min_ttl_at = 60, time.monotonic()
+        seen = []
+
+        def raise404(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {}, io.BytesIO(b'{"detail":"gone"}'))
+
+        with mock.patch("urllib.request.urlopen", raise404):
+            self.assertIsNone(p._read("SRV", "_mc._tcp.example.com"))
+            with self.assertRaises(FyrWireError):
+                p._write([{"subname": "x", "type": "A", "ttl": 60,
+                           "records": ["1.2.3.4"]}])
+        del seen
+
+    def test_a_multi_record_rrset_is_never_deleted(self):
+        p = self.provider(lambda m, u, b: {
+            "ttl": 60,
+            "records": ["0 5 51471 node.example.com.",
+                        "10 0 25565 backup.example.com."]})
+        with self.assertRaises(FyrWireError) as cm:
+            p.delete("SRV", "_mc._tcp.play.example.com", expect="node.example.com")
+        self.assertIn("2 records", str(cm.exception))
+        self.assertNotIn("DELETE", [m for m, _, _ in p.calls])
+
+    def test_the_witness_checks_the_target_not_any_field(self):
+        p = self.provider(lambda m, u, b: {
+            "ttl": 60, "records": ["0 5 51471 somewhere-else.net."]})
+        with self.assertRaises(FyrWireError):
+            p.delete("SRV", "_mc._tcp.play.example.com", expect="0")
+        self.assertNotIn("DELETE", [m for m, _, _ in p.calls])
+
+    def test_https_body_is_exactly_right(self):
+        p = self.provider(lambda m, u, b: None)
+        p.ensure_https(HttpsRecordData(name="play.example.com",
+                                   target="node.example.com", port=51471,
+                                   priority=1, ttl=60))
+        body = [b for m, _, b in p.calls if m == "PATCH"][0]
+        self.assertEqual(body[0]["records"],
+                         ["1 node.example.com. port=51471"])
+
+    def test_https_reordered_and_quoted_params_are_not_a_change(self):
+        url = "https://desec.io/api/v1/domains/example.com/rrsets/play/HTTPS/"
+        p = self.provider(lambda m, u, b: (
+            {"ttl": 60, "records": ['1 node.example.com. port="51471"']}
+            if m == "GET" else None))
+        self.assertIsNone(p.ensure_https(HttpsRecordData(
+            name="play.example.com", target="node.example.com",
+            port=51471, priority=1, ttl=60)))
+        del url
+
+    def test_an_ip_literal_target_is_refused(self):
+        p = self.provider(lambda m, u, b: None)
+        with self.assertRaises(FyrWireError) as cm:
+            p.ensure_srv(SrvRecordData("_mc._tcp.example.com", "203.0.113.5",
+                                   51471, 0, 5, 60))
+        self.assertIn("hostname", str(cm.exception))
+
+    def test_an_underscore_in_the_target_is_refused(self):
+        p = self.provider(lambda m, u, b: None)
+        with self.assertRaises(FyrWireError):
+            p.ensure_srv(SrvRecordData("_mc._tcp.example.com", "node_1.example.com",
+                                   51471, 0, 5, 60))
+
+    def test_auth_scheme_is_token_not_bearer(self):
+        captured = {}
+
+        def fake(req, timeout=None):
+            captured["auth"] = req.get_header("Authorization")
+            raise urllib.error.HTTPError(req.full_url, 401, "no", {},
+                                         io.BytesIO(b'{"detail":"x"}'))
+
+        p = providers.DesecProvider(token="secret", domain="example.com")
+        with mock.patch("urllib.request.urlopen", fake):
+            with self.assertRaises(FyrWireError):
+                p._call("GET", p._url("domains", "example.com"))
+        self.assertEqual(captured["auth"], "Token secret")
+
+    def test_429_becomes_rate_limited_and_carries_retry_after(self):
+        def fake(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 429, "slow down", {"Retry-After": "7"},
+                io.BytesIO(b'{"detail":"throttled"}'))
+
+        p = providers.DesecProvider(token="t", domain="example.com")
+        with mock.patch("urllib.request.urlopen", fake):
+            with self.assertRaises(providers.RateLimited) as cm:
+                p._call("GET", p._url("domains", "example.com"))
+        self.assertEqual(cm.exception.retry_after, 7.0)
+
+    def test_transient_server_errors_are_retryable_not_fatal(self):
+        for code, want_retryable in ((503, True), (500, True), (409, True),
+                                     (403, False), (401, False), (400, False)):
+            def fake(req, timeout=None, _c=code):
+                raise urllib.error.HTTPError(req.full_url, _c, "x", {},
+                                             io.BytesIO(b'{"detail":"y"}'))
+
+            p = providers.DesecProvider(token="t", domain="example.com")
+            with mock.patch("urllib.request.urlopen", fake):
+                with self.assertRaises(FyrWireError) as cm:
+                    p._call("GET", p._url("domains", "example.com"))
+            got = isinstance(cm.exception, providers.RateLimited)
+            self.assertEqual(got, want_retryable, f"HTTP {code}")
+
+    def test_error_bodies_are_flattened_into_a_sentence(self):
+        self.assertIn("Ensure this value",
+                      providers._flatten_desec_error(
+                          '{"ttl":["Ensure this value is >= 3600."]}'))
+        self.assertIn("ttl:", providers._flatten_desec_error(
+            '{"ttl":["bad"]}'))
+        self.assertEqual("plain", providers._flatten_desec_error("plain"))
+
+    def test_the_ttl_floor_is_re_read_rather_than_frozen_for_the_process(self):
+        calls = []
+        p = self.provider(lambda m, u, b: (calls.append(u) or
+                                           {"minimum_ttl": 3600}))
+        p._minimum_ttl, p._min_ttl_at = 3600, time.monotonic()
+        p.minimum_ttl()
+        self.assertEqual(len(calls), 0, "fresh, so no refetch")
+        p._min_ttl_at = time.monotonic() - 99999
+        p.minimum_ttl()
+        self.assertEqual(len(calls), 1, "stale, so refetched")
+
+    def test_a_missing_minimum_ttl_is_refused_rather_than_guessed(self):
+        p = self.provider(lambda m, u, b: {"name": "example.com"})
+        p._minimum_ttl = None
+        with self.assertRaises(FyrWireError) as cm:
+            p.minimum_ttl()
+        self.assertIn("Refusing to guess", str(cm.exception))
+
+    def test_the_cloudflare_witness_ignores_case(self):
+        cf = FakeCloudflare()
+        cf.records = [{"id": "1", "type": "SRV", "name": "s.example.com",
+                       "comment": CloudflareProvider.TAG,
+                       "data": {"target": "Node.Example.COM"}}]
+        self.assertIsNotNone(
+            cf.delete("SRV", "s.example.com", expect="node.example.com"))

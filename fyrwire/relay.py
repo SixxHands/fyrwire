@@ -127,6 +127,7 @@ class RelayManager:
                 continue
             if cur is not None:
                 self._call(cur.stop())
+                self._listeners.pop(key, None)
             bh, bp, th, tp, proto = spec
             cls = _UdpListener if proto == "udp" else _Listener
             kw = dict(self.udp_options) if proto == "udp" else {}
@@ -189,6 +190,9 @@ class _UdpSession:
     sock: socket.socket
     transport: asyncio.DatagramTransport | None = None
     proto: object = None
+    attaching: bool = False
+    dead: bool = False
+    attach_task: object = None
     last_rx: float = 0.0
     last_tx: float = 0.0
     replied: bool = False
@@ -264,12 +268,16 @@ class _UdpListener:
         self.backend: tuple | None = None
         self._reaper: asyncio.Task | None = None
         self._tokens = float(new_per_sec)
-        self._tokens_at = 0.0
+        self._tokens_at = now()
 
         self.total = 0
         self.dropped = 0
+        self.send_dropped = 0
         self.upstream_errors = 0
+        self.listener_errors = 0
         self.open_failed = 0
+        self.c2s_bytes = 0
+        self.s2c_bytes = 0
 
     @staticmethod
     def _clamp(cap: int) -> int:
@@ -290,8 +298,6 @@ class _UdpListener:
 
     def _allow_new(self) -> bool:
         now = self.now()
-        if self._tokens_at == 0.0:
-            self._tokens_at = now
         self._tokens = min(self.new_per_sec,
                            self._tokens + (now - self._tokens_at) * self.new_per_sec)
         self._tokens_at = now
@@ -322,9 +328,13 @@ class _UdpListener:
             self._reaper = None
         waits = []
         for s in list(self.sessions.values()):
+            s.dead = True
             if s.transport is not None:
                 waits.append(s.proto.lost)
                 s.transport.close()
+            elif s.attaching:
+                if s.attach_task is not None:
+                    waits.append(s.attach_task)
             else:
                 s.sock.close()
         self.sessions.clear()
@@ -357,7 +367,8 @@ class _UdpListener:
         self.sessions[addr] = s
         self.per_ip[addr[0]] = self.per_ip.get(addr[0], 0) + 1
         self.total += 1
-        self.loop.create_task(self._attach(s))
+        s.attaching = True
+        s.attach_task = self.loop.create_task(self._attach(s))
         return s
 
     async def _attach(self, s: _UdpSession) -> None:
@@ -365,13 +376,20 @@ class _UdpListener:
         try:
             t, _ = await self.loop.create_datagram_endpoint(
                 lambda: proto, sock=s.sock)
-        except OSError:
-            self._evict(s, "attach failed")
-            return
-        if self.sessions.get(s.client) is not s:
-            t.close()
+        except Exception as e:
+            s.attaching = False
+            self.open_failed += 1
+            self._evict(s, f"attach failed: {e}")
+            try:
+                s.sock.close()
+            except OSError:
+                pass
             return
         s.transport, s.proto = t, proto
+        s.attaching = False
+        if s.dead or self.sessions.get(s.client) is not s:
+            t.close()
+            return
 
     def _evict(self, s: _UdpSession, reason: str = "") -> None:
         if self.sessions.get(s.client) is s:
@@ -381,9 +399,10 @@ class _UdpListener:
                 self.per_ip.pop(s.client[0], None)
             else:
                 self.per_ip[s.client[0]] = n
+        s.dead = True
         if s.transport is not None:
             s.transport.close()
-        else:
+        elif not s.attaching:
             try:
                 s.sock.close()
             except OSError:
@@ -423,6 +442,7 @@ class _UdpListener:
                 return
         s.last_rx = self.now()
         s.c2s_bytes += len(data)
+        self.c2s_bytes += len(data)
         self._send_upstream(s, data)
 
     def _send_upstream(self, s: _UdpSession, data: bytes) -> None:
@@ -432,7 +452,7 @@ class _UdpListener:
             else:
                 s.sock.send(data)
         except BlockingIOError:
-            self.dropped += 1
+            self.send_dropped += 1
         except OSError as e:
             self.upstream_errors += 1
             self._evict(s, f"send errno {e.errno}")
@@ -440,9 +460,12 @@ class _UdpListener:
     def on_backend(self, s: _UdpSession, data: bytes) -> None:
         if self.transport is None or self.sessions.get(s.client) is not s:
             return
+        if not data and self.drop_zero_length:
+            return
         s.replied = True
         s.last_tx = self.now()
         s.s2c_bytes += len(data)
+        self.s2c_bytes += len(data)
         try:
             self.transport.sendto(data, s.client)
         except OSError:
@@ -453,7 +476,7 @@ class _UdpListener:
         self._evict(s, f"upstream {exc}")
 
     def on_listener_error(self, exc) -> None:
-        self.upstream_errors += 1
+        self.listener_errors += 1
         if sys.platform == "win32":
             self.log(f"udp relay {self.key}: listener error on Windows ({exc}); "
                      f"rebuilding, as the transport may have gone deaf")
@@ -474,7 +497,9 @@ class _UdpListener:
                 "sessions": len(self.sessions),
                 "sessions_total": self.total,
                 "sessions_dropped": self.dropped,
+                "send_dropped": self.send_dropped,
                 "upstream_errors": self.upstream_errors,
+                "listener_errors": self.listener_errors,
                 "open_failed": self.open_failed,
-                "c2s_bytes": sum(s.c2s_bytes for s in self.sessions.values()),
-                "s2c_bytes": sum(s.s2c_bytes for s in self.sessions.values())}
+                "c2s_bytes": self.c2s_bytes,
+                "s2c_bytes": self.s2c_bytes}

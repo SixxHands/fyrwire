@@ -471,8 +471,17 @@ def _setup_desec():
     if token:
         _say(f"  {DIM}using FYRWIRE_DESEC_TOKEN from the environment{RESET}")
     else:
-        _say(f"  {DIM}desec.io -> Token management -> Create token.")
-        _say(f"  Leave the permission boxes alone; the default can edit DNS.{RESET}")
+        _say(f"  {DIM}desec.io -> Token management -> Create token.{RESET}")
+        _warn("a deSEC token with no policy attached can write EVERY record")
+        _say(f"    {DIM}on your account — deSEC treats 'no policy' as full write")
+        _say(f"    access, which is the opposite of most APIs. FyrWire only ever")
+        _say(f"    touches the records it publishes, but a leaked token would not")
+        _say(f"    be so careful.")
+        _say(f"")
+        _say(f"    To scope it, add RRset policies to the token after creating it:")
+        _say(f"      a deny-all default, then allow only the names below.")
+        _say(f"    Do NOT use your account login token — it expires when unused")
+        _say(f"    and the agent will stop.{RESET}")
         token = _ask("API token")
     if not token:
         _bad("a token is required")

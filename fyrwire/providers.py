@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+from urllib.parse import quote
 
 from .models import FyrWireError, HttpsRecordData, SrvRecordData
 
@@ -13,6 +16,64 @@ class RateLimited(FyrWireError):
     def __init__(self, message: str, retry_after: float | None = None):
         super().__init__(message)
         self.retry_after = retry_after
+
+_IPV4 = re.compile(r"^\d{1,3}(\.\d{1,3}){3}\.?$")
+
+
+def _check_target(target: str) -> None:
+    t = target.strip().rstrip(".")
+    if not t:
+        raise FyrWireError("SRV/HTTPS target is empty")
+    if _IPV4.match(target.strip()):
+        raise FyrWireError(
+            f"{target!r} is an IP address, but an SRV/HTTPS target must be a "
+            f"hostname. Point node.a_name at a NAME whose A record holds the "
+            f"address — an IP here produces a record that resolves fine and "
+            f"then fails in the client.")
+    if "_" in t:
+        raise FyrWireError(
+            f"{target!r} contains an underscore. That is legal in the SRV "
+            f"NAME (_minecraft._tcp....) but not in its TARGET, and deSEC "
+            f"rejects it with a parse error that names neither.")
+
+
+def _target_of(rtype: str, value: str) -> str | None:
+    fields = value.split()
+    if rtype == "SRV":
+        return fields[3] if len(fields) >= 4 else None
+    if rtype in ("HTTPS", "SVCB"):
+        return fields[1] if len(fields) >= 2 else None
+    if rtype in ("A", "AAAA", "CNAME"):
+        return fields[0] if fields else None
+    return None
+
+
+def _flatten_desec_error(detail: str) -> str:
+    try:
+        obj = json.loads(detail)
+    except (ValueError, TypeError):
+        return detail.strip()[:200]
+    parts: list[str] = []
+
+    def walk(o):
+        if isinstance(o, str):
+            parts.append(o)
+        elif isinstance(o, list):
+            for i in o:
+                walk(i)
+        elif isinstance(o, dict):
+            for k, v in o.items():
+                if k == "detail":
+                    walk(v)
+                else:
+                    before = len(parts)
+                    walk(v)
+                    for i in range(before, len(parts)):
+                        parts[i] = f"{k}: {parts[i]}"
+
+    walk(obj)
+    return "; ".join(parts)[:300] or detail.strip()[:200]
+
 
 _REGISTRY: dict[str, type["DnsProvider"]] = {}
 
@@ -186,7 +247,7 @@ class CloudflareProvider(IDnsProvider):
         if expect is not None:
             data = (existing or {}).get("data") or {}
             actual = str(data.get("target") or existing.get("content") or "")
-            if actual.rstrip(".") != expect.rstrip("."):
+            if actual.rstrip(".").lower() != expect.rstrip(".").lower():
                 raise FyrWireError(
                     f"{rtype} {name} points at {actual!r}, not the expected "
                     f"{expect!r} — refusing to delete a record that is not ours")
@@ -205,12 +266,14 @@ class DesecProvider(IDnsProvider):
         if not token or not domain:
             raise FyrWireError("desec provider needs token and domain")
         self.token = token
-        self.domain = domain.strip(".").lower()
+        self.domain = domain.strip().strip(".").lower()
         self.timeout = int(timeout)
         self._minimum_ttl: int | None = None
+        self._min_ttl_at = 0.0
 
     def _url(self, *parts: str) -> str:
-        return f"{self.API}/" + "/".join(p.strip("/") for p in parts) + "/"
+        clean = [quote(p.strip(), safe="@*") for p in parts]
+        return f"{self.API}/" + "/".join(clean) + "/"
 
     def _call(self, method: str, url: str, body=None):
         data = json.dumps(body).encode() if body is not None else None
@@ -231,23 +294,44 @@ class DesecProvider(IDnsProvider):
                     retry = None
                 raise RateLimited(
                     f"desec rate limit ({detail})", retry_after=retry) from None
-            if e.code == 404:
+            if e.code == 404 and method == "GET":
                 return None
+            if e.code == 404 and method == "DELETE":
+                return None
+            msg = _flatten_desec_error(detail)
+            if e.code in (401, 403):
+                raise FyrWireError(
+                    f"desec refused the token (HTTP {e.code}): {msg}. This is a "
+                    f"permissions problem, not a transient one — retrying will "
+                    f"not help.") from None
+            if e.code in (409, 500, 502, 503, 504):
+                raise RateLimited(
+                    f"desec temporary failure (HTTP {e.code}): {msg}") from None
             raise FyrWireError(
-                f"desec {method} -> HTTP {e.code}: {detail}") from None
+                f"desec {method} -> HTTP {e.code}: {msg}") from None
         except (urllib.error.URLError, TimeoutError) as e:
             raise FyrWireError(f"desec unreachable: {e}") from None
         except json.JSONDecodeError as e:
             raise FyrWireError(f"desec returned unparseable JSON: {e}") from None
 
-    def minimum_ttl(self) -> int:
-        if self._minimum_ttl is None:
+    MIN_TTL_CACHE_SECONDS = 3600
+
+    def minimum_ttl(self, force: bool = False) -> int:
+        now = time.monotonic()
+        if (force or self._minimum_ttl is None
+                or now - self._min_ttl_at > self.MIN_TTL_CACHE_SECONDS):
             dom = self._call("GET", self._url("domains", self.domain))
             if not dom:
                 raise FyrWireError(
                     f"desec does not have a domain named {self.domain!r} on this "
                     f"account — check the name, or add it at desec.io first")
-            self._minimum_ttl = int(dom.get("minimum_ttl", 3600))
+            raw = dom.get("minimum_ttl")
+            if raw is None:
+                raise FyrWireError(
+                    f"desec did not report a minimum_ttl for {self.domain} — "
+                    f"the API may have changed. Refusing to guess.")
+            self._minimum_ttl = int(raw)
+            self._min_ttl_at = now
         return self._minimum_ttl
 
     def _check_ttl(self, ttl: int) -> None:
@@ -262,7 +346,7 @@ class DesecProvider(IDnsProvider):
                 f"a lower-TTL exception (they grant them on request).")
 
     def _subname(self, name: str) -> str:
-        n = name.strip(".").lower()
+        n = name.strip().strip(".").lower()
         if n == self.domain:
             return ""
         suffix = "." + self.domain
@@ -283,19 +367,30 @@ class DesecProvider(IDnsProvider):
         self._call("PATCH", self._url("domains", self.domain, "rrsets"), rrsets)
 
     @staticmethod
-    def _same(existing: dict | None, records: list[str], ttl: int) -> bool:
+    def _canon(rtype: str, value: str) -> str:
+        fields = value.split()
+        if rtype in ("HTTPS", "SVCB") and len(fields) >= 2:
+            params = sorted(f.replace('"', "") for f in fields[2:])
+            return " ".join([fields[0], fields[1].rstrip(".").lower()] + params)
+        if rtype == "SRV" and len(fields) >= 4:
+            return " ".join(fields[:3] + [fields[3].rstrip(".").lower()])
+        return value.strip().lower()
+
+    @classmethod
+    def _same(cls, rtype: str, existing: dict | None, records: list[str],
+              ttl: int) -> bool:
         if not existing:
             return False
         if int(existing.get("ttl", -1)) != int(ttl):
             return False
-        return (sorted(r.lower() for r in existing.get("records", []))
-                == sorted(r.lower() for r in records))
+        return (sorted(cls._canon(rtype, str(r)) for r in existing.get("records", []))
+                == sorted(cls._canon(rtype, r) for r in records))
 
     def _ensure(self, rtype: str, name: str, records: list[str],
                 ttl: int) -> str | None:
         self._check_ttl(ttl)
         existing = self._read(rtype, name)
-        if self._same(existing, records, ttl):
+        if self._same(rtype, existing, records, ttl):
             return None
         verb = "updated" if existing else "created"
         self._write([{"subname": self._subname(name), "type": rtype,
@@ -307,11 +402,13 @@ class DesecProvider(IDnsProvider):
         return f"{what} -> {ip}" if what else None
 
     def ensure_srv(self, rec: SrvRecordData) -> str | None:
+        _check_target(rec.target)
         value = f"{rec.priority} {rec.weight} {rec.port} {rec.target.rstrip('.')}."
         what = self._ensure("SRV", rec.name, [value], rec.ttl)
         return f"{what} -> {rec.value}" if what else None
 
     def ensure_https(self, rec: HttpsRecordData) -> str | None:
+        _check_target(rec.target)
         value = (f"{rec.priority} {rec.target.rstrip('.')}. "
                  f"port={rec.port}")
         what = self._ensure("HTTPS", rec.name, [value], rec.ttl)
@@ -324,16 +421,21 @@ class DesecProvider(IDnsProvider):
                 f"witness — desec has no record metadata, so the only safe proof "
                 f"is that the record points where FyrWire published")
         existing = self._read(rtype, name)
-        if not existing or not existing.get("records"):
+        records = (existing or {}).get("records") or []
+        if not records:
             return None
-        want = expect.rstrip(".").lower()
-        for value in existing["records"]:
-            if want in [f.rstrip(".").lower() for f in str(value).split()]:
-                break
-        else:
+        if len(records) > 1:
             raise FyrWireError(
-                f"{rtype} {name} does not point at {expect!r} — refusing to "
-                f"delete a record that is not ours")
+                f"{rtype} {name} holds {len(records)} records, and deSEC can "
+                f"only delete the whole set. Removing ours would take the "
+                f"others with it, so this has to be done by hand:\n  "
+                + "\n  ".join(str(r) for r in records))
+        want = expect.rstrip(".").lower()
+        actual = _target_of(rtype, str(records[0]))
+        if actual is None or actual.rstrip(".").lower() != want:
+            raise FyrWireError(
+                f"{rtype} {name} points at {actual!r}, not the expected "
+                f"{expect!r} — refusing to delete a record that is not ours")
         sub = self._subname(name)
         self._call("DELETE",
                    self._url("domains", self.domain, "rrsets", sub or "@", rtype))

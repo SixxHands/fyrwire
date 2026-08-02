@@ -37,15 +37,19 @@ def load_config(path: str, resolve_secrets: bool = True) -> dict:
     cfg = config.validate(cfg)
     if not resolve_secrets:
         return cfg
-    prov = dict(cfg["provider"])
-    for k, v in list(prov.items()):
-        if isinstance(v, str) and v.startswith("env:"):
+    for section in ("provider", "source"):
+        table = dict(cfg.get(section) or {})
+        for k, v in list(table.items()):
+            if not (isinstance(v, str) and v.startswith("env:")):
+                continue
             env = v[4:]
             got = os.environ.get(env)
             if not got:
-                raise FyrWireError(f"provider.{k} references ${env}, which is unset")
-            prov[k] = got
-    cfg["provider"] = prov
+                raise FyrWireError(
+                    f"{section}.{k} references ${env}, which is unset")
+            table[k] = got
+        cfg[section] = table
+    config.recheck_resolved(cfg)
     return cfg
 
 
@@ -184,6 +188,15 @@ def cmd_uninstall(args) -> int:
     return install_mod.uninstall(args.config)
 
 
+def _token_from(cfg: dict, key: str, fallback_env: str) -> str:
+    raw = (cfg.get("provider") or {}).get(key, "")
+    if isinstance(raw, str) and raw.startswith("env:"):
+        return os.environ.get(raw[4:], "")
+    if isinstance(raw, str) and raw:
+        return raw
+    return os.environ.get(fallback_env, "")
+
+
 def cmd_doctor(args) -> int:
     from . import detect, hostinfo
     cfg = load_config(args.config, resolve_secrets=False)
@@ -209,7 +222,7 @@ def cmd_doctor(args) -> int:
 
     ptype = cfg["provider"].get("type", "cloudflare")
     if ptype == "desec":
-        tok = os.environ.get("FYRWIRE_DESEC_TOKEN", "")
+        tok = _token_from(cfg, "token", "FYRWIRE_DESEC_TOKEN")
         domain = cfg["provider"].get("domain", "")
         if tok:
             domains, err = detect.desec_domains(tok)
@@ -226,9 +239,9 @@ def cmd_doctor(args) -> int:
                         print(f"  ttl                      "
                               f"WARN  deSEC floor is {mt}s, config asks {plan.ttl}s")
         else:
-            print("  token                    SKIPPED (FYRWIRE_DESEC_TOKEN unset)")
+            print("  token                    SKIPPED (no token in config or environment)")
     else:
-        tok = os.environ.get("FYRWIRE_CF_TOKEN", "")
+        tok = _token_from(cfg, "api_token", "FYRWIRE_CF_TOKEN")
         zone = cfg["provider"].get("zone_id", "")
         if tok and zone:
             good, why = detect.verify_token(tok)
@@ -239,7 +252,7 @@ def cmd_doctor(args) -> int:
                 print(f"  zone access              " + ("OK" if can else f"DENIED  {why}"))
                 ok &= can
         else:
-            print("  token                    SKIPPED (FYRWIRE_CF_TOKEN unset)")
+            print("  token                    SKIPPED (no token in config or environment)")
 
     listening = {p for p, _ in detect.listening_ports()}
     for svc in plan.services:

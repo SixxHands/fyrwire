@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
 from .models import FyrWireError, HttpsRecordData, NodePlanData, SrvRecordData
+from .providers import RateLimited
 from .relay import RelayManager, tunnel_address
 
 
@@ -60,6 +62,17 @@ class Agent:
                        if relay else None)
         self.notifier = notifier
 
+    WRITE_SPACING = 0.55
+
+    def _paced(self, fn, *a, **kw):
+        gap = time.monotonic() - self._last_write
+        if gap < self.WRITE_SPACING:
+            time.sleep(self.WRITE_SPACING - gap)
+        try:
+            return fn(*a, **kw)
+        finally:
+            self._last_write = time.monotonic()
+
     def tick(self, force: bool = False) -> dict:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
@@ -81,9 +94,11 @@ class Agent:
 
         changes: list[str] = []
         skipped = sorted(res.partial)
+        self._last_write = 0.0
 
         if force or res.host != self.state.last_host:
-            c = self.provider.ensure_a(self.plan.a_name, res.host, self.plan.ttl)
+            c = self._paced(self.provider.ensure_a,
+                            self.plan.a_name, res.host, self.plan.ttl)
             if c:
                 changes.append(c)
             self.state.last_host = res.host
@@ -100,11 +115,11 @@ class Agent:
                 self.state.last_ports[svc.key] = port
                 continue
             if kind == "https":
-                c = self.provider.ensure_https(HttpsRecordData(
+                c = self._paced(self.provider.ensure_https, HttpsRecordData(
                     name=svc.srv_name, target=self.plan.a_name, port=port,
                     ttl=svc.ttl or self.plan.ttl))
             else:
-                c = self.provider.ensure_srv(SrvRecordData(
+                c = self._paced(self.provider.ensure_srv, SrvRecordData(
                     name=svc.srv_name, target=self.plan.a_name, port=port,
                     priority=svc.priority, weight=svc.weight,
                     ttl=svc.ttl or self.plan.ttl))
@@ -157,8 +172,21 @@ class Agent:
 
     def run(self, interval: int, max_cycles: int | None = None) -> None:
         n = 0
+        backoff = 0
         while max_cycles is None or n < max_cycles:
-            self.tick()
+            wait = interval
+            try:
+                self.tick()
+                backoff = 0
+            except RateLimited as e:
+                backoff = min(backoff * 2 or interval, 900)
+                wait = max(backoff, int(getattr(e, "retry_after", 0) or 0))
+                self.log(f"rate limited; waiting {wait}s — {e}")
+            except FyrWireError as e:
+                self.log(f"cycle failed: {e}")
+            except Exception as e:
+                self.log(f"unexpected error: {e!r}")
+                self.log(traceback.format_exc().rstrip())
             n += 1
             if max_cycles is None or n < max_cycles:
-                time.sleep(interval)
+                time.sleep(wait)

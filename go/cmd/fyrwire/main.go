@@ -70,6 +70,19 @@ func main() {
 		err = cmdPresets()
 	case "sources":
 		err = cmdSources()
+	case "init":
+		err = setup.Init(*cfgPath, len(args) > 1 && args[1] == "--force")
+	case "add":
+		err = setup.Add(*cfgPath)
+	case "remove":
+		if len(args) < 2 {
+			err = model.Errorf("usage: fyrwire remove NAME [--keep-dns]")
+		} else {
+			err = setup.Remove(*cfgPath, args[1],
+				len(args) > 2 && args[2] == "--keep-dns")
+		}
+	case "check":
+		err = setup.Check(*cfgPath, 6*time.Second)
 	case "setup":
 		err = setup.Run(*cfgPath, len(args) > 1 && args[1] == "--force")
 	case "install":
@@ -94,7 +107,11 @@ func usage() {
 	fmt.Println(`
   fyrwire [--config PATH] [--state PATH] COMMAND
 
+    init        write a starter config
     setup       guided first-run setup — the only thing you need is a token
+    add         add a service to an existing config
+    remove      remove a service and its DNS record
+    check       verify from OUTSIDE: resolve, then connect
     once        one reconcile cycle, then exit
     run         loop forever (this is what the service runs)
     doctor      check an existing setup, publish nothing

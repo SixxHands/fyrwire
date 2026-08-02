@@ -159,7 +159,7 @@ func Add(configPath string) error {
 	return nil
 }
 
-func Remove(configPath, name string, keepDNS bool) error {
+func Remove(configPath, name string, keepDNS, assumeYes bool) error {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		return model.Errorf("cannot read %s: %v", configPath, err)
@@ -179,6 +179,27 @@ func Remove(configPath, name string, keepDNS bool) error {
 	if target == nil {
 		return model.Errorf("no service called %q — have: %s", name,
 			strings.Join(names, ", "))
+	}
+
+	if len(cfg.Service) == 1 {
+		return model.Errorf(
+			"%q is the only service in %s, and a config with none cannot load.\n"+
+				"  Add another service first, or delete the config file if you "+
+				"are done with this node — the DNS records it published stay "+
+				"until you remove them.",
+			name, configPath)
+	}
+
+	if !keepDNS && !assumeYes {
+		rtype := "SRV"
+		if target.Record == "https" {
+			rtype = "HTTPS"
+		}
+		note("this will DELETE the DNS record %s %s", rtype, target.SrvName)
+		if !yes("Remove it?", false) {
+			say("  %scancelled%s", dim, reset)
+			return nil
+		}
 	}
 
 	if !keepDNS {

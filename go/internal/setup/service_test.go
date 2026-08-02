@@ -1,6 +1,8 @@
 package setup
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -114,4 +116,53 @@ func TestZoneIsDerivedFromEitherProviderShape(t *testing.T) {
 	if got := zoneOf(cfg2); got != "example.com" {
 		t.Errorf("cloudflare: got %q", got)
 	}
+}
+
+func TestRemovingTheOnlyServiceExplainsItself(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "one.toml")
+	one := `[source]
+type = "static"
+host = "1.2.3.4"
+
+[provider]
+type = "cloudflare"
+api_token = "t"
+zone_id = "z"
+
+[node]
+a_name = "node.example.com"
+
+[[service]]
+name = "only"
+internal_port = 25565
+srv_name = "_mc._tcp.example.com"
+`
+	if err := os.WriteFile(path, []byte(one), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Remove(path, "only", true, true)
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "only service") {
+		t.Errorf("must name the actual problem: %v", err)
+	}
+
+	for _, invented := range []string{"--keep-config", "--force-remove"} {
+		if strings.Contains(msg, invented) {
+			t.Errorf("message references a flag that does not exist: %q", invented)
+		}
+	}
+
+	after, _ := os.ReadFile(path)
+	if string(after) != one {
+		t.Error("a refused removal must not modify the config")
+	}
+}
+
+func TestAdvertisedRemoveFlagsExist(t *testing.T) {
+
+	var _ = func(p, n string) error { return Remove(p, n, true, true) }
 }

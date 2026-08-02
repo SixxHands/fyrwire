@@ -81,8 +81,16 @@ func main() {
 		if len(args) < 2 {
 			err = model.Errorf("usage: fyrwire remove NAME [--keep-dns]")
 		} else {
-			err = setup.Remove(*cfgPath, args[1],
-				len(args) > 2 && args[2] == "--keep-dns")
+			keepDNS, assumeYes := false, false
+			for _, a := range args[2:] {
+				switch a {
+				case "--keep-dns":
+					keepDNS = true
+				case "--yes", "-y":
+					assumeYes = true
+				}
+			}
+			err = setup.Remove(*cfgPath, args[1], keepDNS, assumeYes)
 		}
 	case "check":
 		err = setup.Check(*cfgPath, 6*time.Second)
@@ -114,7 +122,7 @@ func usage() {
     init        write a starter config
     setup       guided first-run setup — the only thing you need is a token
     add         add a service to an existing config
-    remove      remove a service and its DNS record
+    remove      remove a service and its DNS record (--keep-dns, --yes)
     check       verify from OUTSIDE: resolve, then connect
     once        one reconcile cycle, then exit
     run         loop forever (this is what the service runs)

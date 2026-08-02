@@ -118,6 +118,9 @@ class NatPmpSource(IPortSource):
         self.retries = int(retries)
         self._log = log
         self._warned: set[str] = set()
+        self._epoch = 0
+        self.restarted = False
+        self.granted_lifetime = 0
 
     def log(self, msg: str) -> None:
         if msg in self._warned:
@@ -154,8 +157,31 @@ class NatPmpSource(IPortSource):
     def _map(self, internal: int, op: int) -> tuple[int, int]:
         frame = struct.pack(">BBHHHI", 0, op, 0, internal, 0, self.lifetime)
         rep = self._rpc(frame, 128 + op)
+        self._check_epoch(struct.unpack(">I", rep[4:8])[0])
+        self._note_lifetime(struct.unpack(">I", rep[12:16])[0])
         return (struct.unpack(">H", rep[8:10])[0],
                 struct.unpack(">H", rep[10:12])[0])
+
+    def _check_epoch(self, epoch: int) -> None:
+        prev, self._epoch = self._epoch, epoch
+        if prev and epoch < prev:
+            self.restarted = True
+            self.log(f"the gateway restarted (epoch {prev} -> {epoch}); every "
+                     f"port mapping was lost, so all of them are being re-created")
+
+    def _note_lifetime(self, secs: int) -> None:
+        if secs <= 0:
+            return
+        if self.granted_lifetime == 0 or secs < self.granted_lifetime:
+            self.granted_lifetime = secs
+        if self.lifetime and secs < self.lifetime:
+            self.log(f"asked the gateway for a {self.lifetime}s port lease and it "
+                     f"granted {secs}s — the agent must reconcile more often than "
+                     f"that or the mapping lapses")
+
+    def took_restart(self) -> bool:
+        was, self.restarted = self.restarted, False
+        return was
 
     def single_port(self, op: int) -> int | None:
         try:

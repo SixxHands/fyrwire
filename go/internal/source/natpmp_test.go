@@ -374,3 +374,75 @@ func TestAGatewayThatAnswersAboutADifferentPortIsNotBelieved(t *testing.T) {
 		t.Error("a reply about a different internal port must not be believed")
 	}
 }
+
+func TestTheGrantedLeaseIsReadNotAssumed(t *testing.T) {
+	addr := fakeGateway(t, func(req []byte) []byte {
+		if req[1] == opPublicAddr {
+			return publicAddrReply([4]byte{1, 2, 3, 4})
+		}
+		r := mapReply(req[1], binary.BigEndian.Uint16(req[4:6]), 40000)
+		binary.BigEndian.PutUint32(r[12:16], 60)
+		return r
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	var warnings []string
+	n := &NatPmpSource{Gateway: host, Lifetime: 120, Timeout: 1, Retries: 1,
+		Log: func(s string) { warnings = append(warnings, s) }}
+	if _, err := n.Map(25565, "tcp"); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.GrantedLifetime(); got != 60 {
+		t.Errorf("GrantedLifetime = %d, want the 60 the gateway actually gave", got)
+	}
+	if len(warnings) == 0 {
+		t.Error("a lease shorter than requested must be said out loud — silently " +
+			"refreshing too slowly is an intermittent outage with no error")
+	}
+}
+
+func TestAGatewayRestartIsDetectedAndForcesARepublish(t *testing.T) {
+	epoch := uint32(5000)
+	addr := fakeGateway(t, func(req []byte) []byte {
+		var r []byte
+		if req[1] == opPublicAddr {
+			r = publicAddrReply([4]byte{1, 2, 3, 4})
+		} else {
+			r = mapReply(req[1], binary.BigEndian.Uint16(req[4:6]), 40000)
+		}
+		binary.BigEndian.PutUint32(r[4:8], epoch)
+		return r
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	var warnings []string
+	n := &NatPmpSource{Gateway: host, Lifetime: 120, Timeout: 1, Retries: 1,
+		Log: func(s string) { warnings = append(warnings, s) }}
+
+	n.Map(25565, "tcp")
+	if n.TookRestart() {
+		t.Fatal("no restart has happened yet")
+	}
+	epoch = 6000
+	n.Map(25565, "tcp")
+	if n.TookRestart() {
+		t.Fatal("a rising epoch is not a restart")
+	}
+	epoch = 12
+	n.Map(25565, "tcp")
+	if !n.TookRestart() {
+		t.Fatal("an epoch going backwards means every mapping was lost")
+	}
+	if n.TookRestart() {
+		t.Error("the flag must clear, or every cycle republishes forever")
+	}
+	found := false
+	for _, w := range warnings {
+		if contains(w, "restarted") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the restart must be reported: %v", warnings)
+	}
+}

@@ -1736,3 +1736,69 @@ class TestSinglePortGateway(unittest.TestCase):
         src = self.source(liar)
         with self.assertRaises(FyrWireError):
             src.resolve([Service("mc", 25565, "_mc._tcp.example.com").request()])
+
+
+class TestGatewayHonesty(unittest.TestCase):
+
+    def source(self, epoch=1000, lifetime=60):
+        from fyrwire import sources
+        import struct as _s
+
+        class Fake(sources.NatPmpSource):
+            def __init__(self, outer):
+                super().__init__(gateway="10.0.0.1", lifetime=120,
+                                 log=lambda m: outer.messages.append(m))
+                self.epoch = epoch
+                self.lease = lifetime
+
+            def _rpc(self, payload, expect_op):
+                if len(payload) == 2:
+                    return (b"\x00\x80\x00\x00" + _s.pack(">I", self.epoch)
+                            + bytes([1, 2, 3, 4]))
+                internal = _s.unpack(">H", payload[4:6])[0]
+                return (b"\x00" + bytes([expect_op]) + b"\x00\x00"
+                        + _s.pack(">I", self.epoch)
+                        + _s.pack(">HH", internal, 40000)
+                        + _s.pack(">I", self.lease))
+
+        self.messages = []
+        return Fake(self)
+
+    def test_a_shorter_lease_than_requested_is_reported(self):
+        src = self.source(lifetime=60)
+        src._map(25565, 2)
+        self.assertEqual(src.granted_lifetime, 60)
+        self.assertTrue(any("granted 60s" in m for m in self.messages),
+                        "silently refreshing too slowly is an intermittent "
+                        "outage with nothing in any log")
+
+    def test_an_epoch_going_backwards_is_a_gateway_restart(self):
+        src = self.source(epoch=5000)
+        src._map(25565, 2)
+        self.assertFalse(src.took_restart())
+        src.epoch = 6000
+        src._map(25565, 2)
+        self.assertFalse(src.took_restart(), "a rising epoch is normal")
+        src.epoch = 12
+        src._map(25565, 2)
+        self.assertTrue(src.took_restart(),
+                        "an epoch going backwards means every mapping was lost")
+        self.assertFalse(src.took_restart(),
+                         "the flag must clear, or every cycle republishes forever")
+
+    def test_a_restart_forces_a_republish_even_when_nothing_changed(self):
+        src = self.source(epoch=5000)
+        prov = FakeProvider()
+        with tempfile.TemporaryDirectory() as d:
+            a = Agent(src, prov, plan(MC), os.path.join(d, "s.json"))
+            a.tick()
+            first = len(prov.srv_calls)
+            a.tick()
+            self.assertEqual(len(prov.srv_calls), first,
+                             "nothing changed, so nothing should republish")
+            src.epoch = 3
+            a.tick()
+            self.assertGreater(len(prov.srv_calls), first,
+                               "after a gateway restart the mapping is gone, so "
+                               "the record must be re-created even though the "
+                               "port is identical")

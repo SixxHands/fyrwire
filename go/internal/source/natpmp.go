@@ -39,7 +39,11 @@ type NatPmpSource struct {
 
 	Log func(string)
 
-	warned map[string]bool
+	Restarted bool
+
+	lastEpoch uint32
+	granted   int
+	warned    map[string]bool
 }
 
 func (n *NatPmpSource) warnOnce(format string, a ...any) {
@@ -138,6 +142,12 @@ func (n *NatPmpSource) PublicAddress() (string, error) {
 }
 
 func (n *NatPmpSource) mapRaw(internal int, protocol string) (gotInternal, external int, err error) {
+	gotInternal, external, _, err = n.mapRawFull(internal, protocol)
+	return
+}
+
+func (n *NatPmpSource) mapRawFull(internal int, protocol string) (
+	gotInternal, external, granted int, err error) {
 	op := byte(opMapTCP)
 	if protocol == "udp" {
 		op = opMapUDP
@@ -154,21 +164,62 @@ func (n *NatPmpSource) mapRaw(internal int, protocol string) (gotInternal, exter
 
 	reply, err := n.exchange(req, 16)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if err := checkResult(reply, op); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
+
+	n.checkEpoch(binary.BigEndian.Uint32(reply[4:8]))
+
 	return int(binary.BigEndian.Uint16(reply[8:10])),
-		int(binary.BigEndian.Uint16(reply[10:12])), nil
+		int(binary.BigEndian.Uint16(reply[10:12])),
+		int(binary.BigEndian.Uint32(reply[12:16])), nil
+}
+
+func (n *NatPmpSource) checkEpoch(epoch uint32) {
+	prev := n.lastEpoch
+	n.lastEpoch = epoch
+	if prev != 0 && epoch < prev {
+
+		n.Restarted = true
+		if n.Log != nil {
+			n.Log(fmt.Sprintf(
+				"the gateway restarted (epoch %d -> %d); every port mapping was "+
+					"lost, so all of them are being re-created", prev, epoch))
+		}
+	}
+}
+
+func (n *NatPmpSource) TookRestart() bool {
+	was := n.Restarted
+	n.Restarted = false
+	return was
+}
+
+func (n *NatPmpSource) GrantedLifetime() int { return n.granted }
+
+func (n *NatPmpSource) noteLifetime(secs int) {
+	if secs <= 0 {
+		return
+	}
+	if n.granted == 0 || secs < n.granted {
+		n.granted = secs
+	}
+	if n.Lifetime > 0 && secs < n.Lifetime {
+		n.warnOnce("asked the gateway for a %ds port lease and it granted %ds — "+
+			"the agent must reconcile more often than that or the mapping lapses",
+			n.Lifetime, secs)
+	}
 }
 
 // Some VPNs (looking at you, Proton) hand out one port per session and ignore whatever internal port you asked for. Asking for 0 catches them.
 func (n *NatPmpSource) SinglePort(protocol string) (port int, isSingle bool) {
-	gotInternal, external, err := n.mapRaw(0, protocol)
+	gotInternal, external, granted, err := n.mapRawFull(0, protocol)
 	if err != nil {
 		return 0, false
 	}
+	n.noteLifetime(granted)
 	if gotInternal != 0 && gotInternal == external && external > 0 {
 		return external, true
 	}
@@ -181,10 +232,11 @@ func (n *NatPmpSource) Map(internal int, protocol string) (int, error) {
 		return 0, model.Errorf(
 			"internal port %d is out of range — a port is 1..65535", internal)
 	}
-	gotInternal, granted, err := n.mapRaw(internal, protocol)
+	gotInternal, granted, lease, err := n.mapRawFull(internal, protocol)
 	if err != nil {
 		return 0, err
 	}
+	n.noteLifetime(lease)
 	if gotInternal != internal {
 
 		return 0, model.Errorf(

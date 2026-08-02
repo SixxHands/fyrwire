@@ -139,6 +139,10 @@ func (a *Agent) Tick(force bool) TickResult {
 
 	a.lastWrite = time.Time{}
 
+	if r, ok := a.src.(interface{ TookRestart() bool }); ok && r.TookRestart() {
+		force = true
+	}
+
 	var changes []string
 	skipped := make([]string, 0, len(res.Partial))
 	for k := range res.Partial {

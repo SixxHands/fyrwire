@@ -96,6 +96,9 @@ class Agent:
             self.log(f"recovered after {self.state.consecutive_failures} failure(s)")
         self.state.consecutive_failures = 0
 
+        if getattr(self.source, "took_restart", None) and self.source.took_restart():
+            force = True
+
         changes: list[str] = []
         skipped = sorted(res.partial)
         self._last_write = 0.0

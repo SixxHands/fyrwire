@@ -27,20 +27,27 @@ type AgentState struct {
 	LastError           string         `json:"last_error"`
 	AlertedDown         bool           `json:"alerted_down"`
 	AlertedServices     []string       `json:"alerted_services"`
+
+	Published map[string]string `json:"published"`
+
+	LastVerified int64 `json:"last_verified"`
 }
 
 func LoadState(path string) *AgentState {
-	s := &AgentState{LastPorts: map[string]int{}}
+	s := &AgentState{LastPorts: map[string]int{}, Published: map[string]string{}}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return s
 	}
 	if err := json.Unmarshal(data, s); err != nil {
 
-		return &AgentState{LastPorts: map[string]int{}}
+		return &AgentState{LastPorts: map[string]int{}, Published: map[string]string{}}
 	}
 	if s.LastPorts == nil {
 		s.LastPorts = map[string]int{}
+	}
+	if s.Published == nil {
+		s.Published = map[string]string{}
 	}
 	return s
 }
@@ -87,6 +94,21 @@ type Agent struct {
 
 const writeSpacing = 550 * time.Millisecond
 
+const reverifyAfter = 15 * time.Minute
+
+func aPrint(name, host string, ttl int) string {
+	return fmt.Sprintf("%s|%s|%d", name, host, ttl)
+}
+
+func (a *Agent) svcPrint(s model.Service, port int) string {
+	ttl := s.TTL
+	if ttl == 0 {
+		ttl = a.plan.TTL
+	}
+	return fmt.Sprintf("%s|%s|%d|%s|%d|%d|%d|%s", s.SrvName, a.plan.AName,
+		port, s.Protocol, s.Priority, s.Weight, ttl, s.Record)
+}
+
 func New(src source.IPortSource, prov provider.IDnsProvider, plan model.NodePlanData, statePath string, opt OptionsData) *Agent {
 	if opt.Log == nil {
 		opt.Log = func(string) {}
@@ -132,14 +154,12 @@ func (a *Agent) Tick(force bool) TickResult {
 
 		return a.fail(err, a.State.LastHost)
 	}
-	if a.State.ConsecutiveFailures > 0 {
-		a.opt.Log(fmt.Sprintf("recovered after %d failure(s)",
-			a.State.ConsecutiveFailures))
-	}
-	a.State.ConsecutiveFailures = 0
-	a.State.LastError = ""
 
 	a.lastWrite = time.Time{}
+
+	if time.Since(time.Unix(a.State.LastVerified, 0)) > reverifyAfter {
+		force = true
+	}
 
 	if r, ok := a.src.(interface{ TookRestart() bool }); ok && r.TookRestart() {
 		force = true
@@ -171,7 +191,8 @@ func (a *Agent) Tick(force bool) TickResult {
 	}
 	sort.Strings(skipped)
 
-	if force || res.Host != a.State.LastHost {
+	aFP := aPrint(a.plan.AName, res.Host, a.plan.TTL)
+	if force || aFP != a.State.Published["@a"] {
 		what, err := a.paced(func() (string, error) {
 			return a.prov.EnsureA(a.plan.AName, res.Host, a.plan.TTL)
 		})
@@ -182,6 +203,7 @@ func (a *Agent) Tick(force bool) TickResult {
 			changes = append(changes, what)
 		}
 		a.State.LastHost = res.Host
+		a.State.Published["@a"] = aFP
 	}
 
 	for _, svc := range a.plan.Services {
@@ -190,7 +212,8 @@ func (a *Agent) Tick(force bool) TickResult {
 
 			continue
 		}
-		if !force && a.State.LastPorts[svc.Key] == port {
+		fp := a.svcPrint(svc, port)
+		if !force && a.State.Published[svc.Key] == fp {
 			continue
 		}
 		ttl := svc.TTL
@@ -203,6 +226,7 @@ func (a *Agent) Tick(force bool) TickResult {
 		case model.RecordNone:
 
 			a.State.LastPorts[svc.Key] = port
+			a.State.Published[svc.Key] = fp
 			continue
 		case model.RecordHTTPS:
 			what, err = a.paced(func() (string, error) {
@@ -223,9 +247,18 @@ func (a *Agent) Tick(force bool) TickResult {
 			changes = append(changes, what)
 		}
 		a.State.LastPorts[svc.Key] = port
+		a.State.Published[svc.Key] = fp
 	}
 
 	a.alert(TickResult{OK: true, Host: res.Host, Skipped: skipped, Reasons: reasons})
+
+	if a.State.ConsecutiveFailures > 0 {
+		a.opt.Log(fmt.Sprintf("recovered after %d failure(s)",
+			a.State.ConsecutiveFailures))
+	}
+	a.State.ConsecutiveFailures = 0
+	a.State.LastError = ""
+	a.State.LastVerified = time.Now().Unix()
 
 	if len(changes) > 0 {
 		a.State.TotalPublishes++

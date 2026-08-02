@@ -200,16 +200,26 @@ class NatPmpSource(IPortSource):
         partial: set[str] = set()
 
         if requests:
-            op = 2 if requests[0].protocol.lower() == "tcp" else 1
-            granted = self.single_port(op)
-            if granted is not None:
+            protocols = {r.protocol.lower() for r in requests}
+            granted: dict[str, int] = {}
+            for proto in protocols:
+                got = self.single_port(2 if proto == "tcp" else 1)
+                if got is not None:
+                    granted[proto] = got
+            if granted:
                 for req in requests:
-                    ports[req.key] = granted
-                if len(requests) > 1:
-                    self.log(
-                        f"this gateway grants ONE port for the whole session, so "
-                        f"all {len(requests)} services share port {granted} — only "
-                        f"the one your relay targets will actually work")
+                    port = granted.get(req.protocol.lower())
+                    if port is None:
+                        partial.add(req.key)
+                        continue
+                    ports[req.key] = port
+                if len(protocols) > 1:
+                    self.log("this gateway grants one port per protocol; tcp "
+                             "and udp services do not share a mapping request")
+                if len(requests) > len(protocols):
+                    self.log("this gateway grants ONE port per session, so "
+                             "services sharing a protocol share a port — only "
+                             "the one your relay targets will actually work")
                 return EndpointData(host, ports, partial)
 
         for req in requests:

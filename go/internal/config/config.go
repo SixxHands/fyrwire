@@ -425,15 +425,17 @@ func (cfg *Config) Plan() (model.NodePlanData, error) {
 	}
 	out := make([]model.Service, 0, len(cfg.Service))
 	for _, s := range cfg.Service {
-		proto := s.Protocol
-		if proto == "" {
-			proto = "tcp"
-		}
+		var protoOverride *string
 		record := s.Record
 		if s.Preset != "" {
-			p, ok := PresetLookup(s.Preset)
+			p, proto, ok := PresetLookup(s.Preset)
 			if !ok {
 				return model.NodePlanData{}, model.Errorf("unknown preset %q", s.Preset)
+			}
+
+			if s.Protocol == "" && proto != "" {
+				proto2 := proto
+				protoOverride = &proto2
 			}
 
 			if record == "" {
@@ -442,6 +444,13 @@ func (cfg *Config) Plan() (model.NodePlanData, error) {
 		}
 		if record == "" {
 			record = model.RecordSRV
+		}
+		proto := s.Protocol
+		if proto == "" && protoOverride != nil {
+			proto = *protoOverride
+		}
+		if proto == "" {
+			proto = "tcp"
 		}
 		weight := 5
 		if s.Weight != nil {
@@ -460,7 +469,9 @@ func (cfg *Config) Plan() (model.NodePlanData, error) {
 	return model.NodePlanData{AName: cfg.Node.AName, Services: out, TTL: ttl}, nil
 }
 
-var PresetLookup = func(key string) (string, bool) { return "", true }
+var PresetLookup = func(key string) (record, protocol string, ok bool) {
+	return "", "", true
+}
 
 func contains(hay []string, needle string) bool {
 	for _, h := range hay {

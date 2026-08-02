@@ -22,6 +22,8 @@ class AgentState:
     history: list = field(default_factory=list)
     alerted_down: bool = False
     alerted_services: list = field(default_factory=list)
+    published: dict = field(default_factory=dict)
+    last_verified: float = 0.0
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -122,9 +124,6 @@ class Agent:
             self._alert(report)
             return report
 
-        if self.state.consecutive_failures:
-            self.log(f"recovered after {self.state.consecutive_failures} failure(s)")
-        self.state.consecutive_failures = 0
 
         if getattr(self.source, "took_restart", None) and self.source.took_restart():
             force = True
@@ -140,23 +139,55 @@ class Agent:
         skipped = sorted(skip)
         self._last_write = 0.0
 
-        if force or res.host != self.state.last_host:
+        try:
+            return self._publish(res, force, changes, skip, skipped,
+                                 reasons, stamp)
+        except FyrWireError as e:
+            self.state.consecutive_failures += 1
+            self.state.last_error = str(e)
+            report = {"ok": False, "error": str(e), "host": res.host,
+                      "kept": {"host": self.state.last_host,
+                               "ports": dict(self.state.last_ports)}}
+            self._alert(report)
+            self.state.save(self.state_path)
+            return report
+
+    REVERIFY_SECONDS = 900
+
+    @staticmethod
+    def _a_print(name: str, host: str, ttl: int) -> str:
+        return f"{name}|{host}|{ttl}"
+
+    def _svc_print(self, svc, port: int) -> str:
+        return "|".join(str(x) for x in (
+            svc.srv_name, self.plan.a_name, port, svc.protocol, svc.priority,
+            svc.weight, svc.ttl or self.plan.ttl, getattr(svc, "record", "srv")))
+
+    def _publish(self, res, force, changes, skip, skipped, reasons,
+                 stamp) -> dict:
+        if time.time() - (self.state.last_verified or 0) > self.REVERIFY_SECONDS:
+            force = True
+        a_fp = self._a_print(self.plan.a_name, res.host, self.plan.ttl)
+        if force or a_fp != self.state.published.get("@a"):
             c = self._paced(self.provider.ensure_a,
                             self.plan.a_name, res.host, self.plan.ttl)
             if c:
                 changes.append(c)
             self.state.last_host = res.host
+            self.state.published["@a"] = a_fp
 
         for svc in self.plan.services:
             port = res.ports.get(svc.key)
             if port is None or svc.key in skip:
                 continue
-            prev = self.state.last_ports.get(svc.key)
-            if not force and prev == port:
+            fp = self._svc_print(svc, port)
+            prev_fp = self.state.published.get(svc.key)
+            if not force and prev_fp == fp:
                 continue
             kind = getattr(svc, "record", "srv")
             if kind == "none":
                 self.state.last_ports[svc.key] = port
+                self.state.published[svc.key] = fp
                 continue
             if kind == "https":
                 c = self._paced(self.provider.ensure_https, HttpsRecordData(
@@ -170,7 +201,14 @@ class Agent:
             if c:
                 changes.append(f"[{svc.key}] {c}")
             self.state.last_ports[svc.key] = port
+            self.state.published[svc.key] = fp
 
+
+        if self.state.consecutive_failures:
+            self.log(f"recovered after {self.state.consecutive_failures} failure(s)")
+        self.state.consecutive_failures = 0
+        self.state.last_error = ""
+        self.state.last_verified = time.time()
 
         if changes:
             self.state.total_publishes += 1

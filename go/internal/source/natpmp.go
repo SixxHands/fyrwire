@@ -262,17 +262,44 @@ func (n *NatPmpSource) Resolve(reqs []model.PortRequestData) (model.EndpointData
 		Partial: map[string]bool{}}
 
 	if len(reqs) > 0 {
-		if port, single := n.SinglePort(reqs[0].Protocol); single {
-			for _, r := range reqs {
 
+		byProto := map[string]bool{}
+		for _, r := range reqs {
+			byProto[r.Protocol] = true
+		}
+		granted := map[string]int{}
+		anySingle := false
+		for proto := range byProto {
+			if port, single := n.SinglePort(proto); single {
+				granted[proto] = port
+				anySingle = true
+			}
+		}
+		if anySingle {
+			for _, r := range reqs {
+				port, ok := granted[r.Protocol]
+				if !ok {
+
+					res.Partial[r.Key] = true
+					continue
+				}
 				res.Ports[r.Key] = port
 			}
-			if len(reqs) > 1 {
-				n.warnOnce("this gateway grants ONE port for the whole session, "+
-					"so all %d services share port %d — only the one your relay "+
-					"targets will actually work", len(reqs), port)
+			if len(byProto) > 1 {
+				n.warnOnce("this gateway grants one port per protocol; tcp and " +
+					"udp services do not share a mapping request")
+			}
+			if len(reqs) > len(byProto) {
+				n.warnOnce("this gateway grants ONE port per session, so " +
+					"services sharing a protocol share a port — only the one " +
+					"your relay targets will actually work")
 			}
 			return res, nil
+		}
+		if false {
+			for _, r := range reqs {
+				_ = r
+			}
 		}
 	}
 

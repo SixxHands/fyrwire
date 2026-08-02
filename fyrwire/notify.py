@@ -5,6 +5,13 @@ import subprocess
 import urllib.error
 import urllib.request
 
+from .models import FyrWireError
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
 _RED = 0xE06C6C
 _GREEN = 0x6EDC96
 _AMBER = 0xF0BE5A
@@ -33,15 +40,24 @@ class Notifier:
         req = urllib.request.Request(
             self.webhook, data=json.dumps(payload).encode(), method="POST",
             headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.timeout):
-            pass
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=self.timeout) as r:
+            if r.status >= 300:
+                raise urllib.error.HTTPError(
+                    self.webhook, r.status,
+                    "the alert was NOT delivered", r.headers, None)
 
     def _run(self, title: str, body: str) -> None:
         if not self.command:
             return
         cmd = self.command.format(title=title, body=body.replace("\n", " "))
-        subprocess.run(cmd, shell=True, timeout=self.timeout,
-                       capture_output=True)
+        r = subprocess.run(cmd, shell=True, timeout=self.timeout,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            first = (r.stderr or "").strip().splitlines()
+            detail = f" — {first[0][:200]}" if first else ""
+            raise FyrWireError(
+                f"alert command exited {r.returncode}{detail}")
 
     def send(self, title: str, body: str, colour: int = _AMBER) -> None:
         for fn in (lambda: self._post(title, body, colour),
@@ -49,7 +65,8 @@ class Notifier:
             try:
                 fn()
             except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-                    subprocess.SubprocessError, TimeoutError) as e:
+                    subprocess.SubprocessError, TimeoutError,
+                    FyrWireError) as e:
                 self.log(f"alert delivery failed: {e}")
 
     def evaluate(self, report: dict, state, node_name: str) -> list[str]:

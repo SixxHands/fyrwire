@@ -75,7 +75,7 @@ def build_plan(cfg: dict) -> NodePlanData:
             key=key,
             internal_port=int(s["internal_port"]),
             srv_name=s["srv_name"],
-            protocol=s.get("protocol", "tcp"),
+            protocol=s.get("protocol", pre.protocol if pre else "tcp"),
             priority=int(s.get("priority", 0)),
             weight=int(s.get("weight", 5)),
             ttl=int(s["ttl"]) if "ttl" in s else None,

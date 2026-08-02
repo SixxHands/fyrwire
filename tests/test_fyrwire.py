@@ -15,6 +15,7 @@ from unittest import mock
 
 from fyrwire.agent import Agent, AgentState
 from fyrwire import config as config_mod
+from fyrwire import notify
 from fyrwire import providers
 from fyrwire.models import (FyrWireError, HttpsRecordData, NodePlanData, EndpointData,
                             Service, SrvRecordData)
@@ -1869,3 +1870,118 @@ class TestRelayBlocksPublish(unittest.TestCase):
                     a.relays.shutdown()
         self.assertEqual(before, after,
                          "the agent poisoned the source's own Resolution")
+
+
+class TestAuditFixes(unittest.TestCase):
+
+    def _agent(self, d, prov, plan_obj, **kw):
+        return Agent(FakeSource(EndpointData("1.2.3.4", {"minecraft": 5000})),
+                     prov, plan_obj, os.path.join(d, "s.json"),
+                     log=lambda *_: None, **kw)
+
+    def test_a_provider_failure_reaches_the_failure_counter(self):
+        class Boom(FakeProvider):
+            def ensure_a(self, *a):
+                raise FyrWireError("403 forbidden")
+
+        with tempfile.TemporaryDirectory() as d:
+            a = self._agent(d, Boom(), plan(MC))
+            r = a.tick()
+        self.assertFalse(r["ok"])
+        self.assertEqual(a.state.consecutive_failures, 1)
+        self.assertIn("403", a.state.last_error)
+
+    def test_the_failure_counter_is_not_reset_by_a_successful_resolve(self):
+        class Boom(FakeProvider):
+            def ensure_a(self, *a):
+                raise FyrWireError("still down")
+
+        with tempfile.TemporaryDirectory() as d:
+            a = self._agent(d, Boom(), plan(MC))
+            for _ in range(3):
+                a.tick()
+        self.assertEqual(a.state.consecutive_failures, 3,
+                         "a streak must accumulate, or alerting never fires")
+
+    def test_a_config_change_other_than_the_port_republishes(self):
+        with tempfile.TemporaryDirectory() as d:
+            prov = FakeProvider()
+            first = plan(Service("minecraft", 5000, "_mc._tcp.example.com",
+                                 ttl=60, priority=0))
+            self._agent(d, prov, first).tick()
+            n = len(prov.srv_calls)
+            changed = plan(Service("minecraft", 5000, "_mc._tcp.example.com",
+                                   ttl=300, priority=10))
+            self._agent(d, prov, changed).tick()
+        self.assertGreater(len(prov.srv_calls), n,
+                           "a ttl/priority edit must reach DNS")
+
+    def test_an_unchanged_plan_still_publishes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            prov = FakeProvider()
+            p = plan(MC)
+            self._agent(d, prov, p).tick()
+            n = len(prov.srv_calls)
+            self._agent(d, prov, p).tick()
+        self.assertEqual(len(prov.srv_calls), n)
+
+    def test_records_are_republished_periodically_even_when_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            prov = FakeProvider()
+            p = plan(MC)
+            a = self._agent(d, prov, p)
+            a.tick()
+            n = len(prov.srv_calls)
+            a.state.last_verified = 0
+            a.tick()
+        self.assertGreater(len(prov.srv_calls), n,
+                           "the plan must be re-asserted periodically")
+
+    def test_a_preset_supplies_its_protocol_not_just_its_record_kind(self):
+        from fyrwire import cli, presets
+        udp_preset = next(p for p in presets.PRESETS.values()
+                          if p.protocol == "udp")
+        cfg = {"source": {"type": "static", "host": "1.2.3.4"},
+               "provider": {"type": "cloudflare", "api_token": "t", "zone_id": "z"},
+               "node": {"a_name": "n.example.com"},
+               "service": [{"name": "x", "internal_port": udp_preset.port,
+                            "preset": udp_preset.key,
+                            "srv_name": "_x._udp.example.com"}]}
+        built = cli.build_plan(cfg)
+        self.assertEqual(built.services[0].protocol, "udp",
+                         f"{udp_preset.key} is a UDP service")
+
+    def test_a_single_port_gateway_is_asked_per_protocol(self):
+        from fyrwire import sources
+        import struct as _s
+        asked = []
+
+        class Fake(sources.NatPmpSource):
+            def __init__(self):
+                super().__init__(gateway="10.0.0.1", log=lambda m: None)
+
+            def _rpc(self, payload, expect_op):
+                if len(payload) == 2:
+                    return b"\x00\x80\x00\x00" + b"\x00" * 4 + bytes([1, 2, 3, 4])
+                op = payload[1]
+                asked.append(op)
+                internal = _s.unpack(">H", payload[4:6])[0]
+                got = 52329 if op == 2 else 61000
+                return (b"\x00" + bytes([expect_op]) + b"\x00\x00" + b"\x00" * 4
+                        + _s.pack(">HH", got if internal == 0 else internal, got)
+                        + _s.pack(">I", 60))
+
+        res = Fake().resolve([
+            Service("mc", 25565, "_mc._tcp.example.com", "tcp").request(),
+            Service("vh", 2456, "_vh._udp.example.com", "udp").request()])
+        self.assertIn(2, asked, "the TCP opcode must be sent")
+        self.assertIn(1, asked, "the UDP opcode must be sent")
+        self.assertNotEqual(res.ports["mc"], res.ports["vh"],
+                            "tcp and udp mappings are separate requests")
+
+    def test_a_failed_alert_command_is_reported(self):
+        logged = []
+        n = notify.Notifier(command="echo boom >&2; exit 7",
+                            log=logged.append)
+        n.send("t", "b")
+        self.assertTrue(any("7" in m for m in logged), logged)

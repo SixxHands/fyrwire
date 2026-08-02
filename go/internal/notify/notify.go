@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -38,8 +39,15 @@ func (n *Notifier) send(title, body string, colour int) {
 			"{title}", title,
 			"{body}", strings.ReplaceAll(body, "\n", " ")).Replace(n.Command)
 		c := exec.Command("sh", "-c", cmd)
+		var stderr bytes.Buffer
+		c.Stderr = &stderr
 		if err := c.Run(); err != nil && n.Log != nil {
-			n.Log("alert command failed: " + err.Error())
+
+			msg := "alert command failed: " + err.Error()
+			if line := firstLine(stderr.String()); line != "" {
+				msg += " — " + line
+			}
+			n.Log(msg)
 		}
 	}
 }
@@ -60,13 +68,30 @@ func (n *Notifier) post(title, body string, colour int) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: n.Timeout}
+
+	client := &http.Client{
+		Timeout: n.Timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Post(n.Webhook, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return errStatus{code: resp.StatusCode}
+	}
 	return nil
+}
+
+type errStatus struct{ code int }
+
+func (e errStatus) Error() string {
+	return "webhook returned HTTP " + strconv.Itoa(e.code) +
+		" — the alert was NOT delivered"
 }
 
 type AlertStatusData struct {
@@ -152,6 +177,16 @@ func (n *Notifier) Evaluate(s AlertStatusData, st *AlertState, node string) []st
 	}
 	st.Services = sortedKeys(nowSkipped)
 	return sent
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return strings.TrimSpace(s)
 }
 
 func sortedKeys(m map[string]bool) []string {

@@ -258,11 +258,11 @@ type serviceError struct{ msg string }
 func (e *serviceError) Error() string { return e.msg }
 
 func init() {
-	registerLookup(func(key string) (string, bool) {
-		p, ok := byKey[key]
-		if !ok {
-			return "", false
+	registerLookup(func(key string) (record, protocol string, ok bool) {
+		p, found := byKey[key]
+		if !found {
+			return "", "", false
 		}
-		return p.Record, true
+		return p.Record, p.Protocol, true
 	})
 }

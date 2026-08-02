@@ -59,9 +59,10 @@ class StaticSource(IPortSource):
 class CommandSource(IPortSource):
 
     def __init__(self, command: str, host: str | None = None, host_command: str | None = None,
-                 timeout: int = 20):
+                 timeout: int = 20, log=None):
         self.command, self.host, self.host_command = command, host, host_command
         self.timeout = int(timeout)
+        self._log = log
 
     def _run(self, cmd: str) -> str:
         try:
@@ -72,6 +73,10 @@ class CommandSource(IPortSource):
         if r.returncode != 0:
             raise FyrWireError(f"command failed ({r.returncode}): {r.stderr.strip()[:160]}")
         return r.stdout.strip()
+
+    def log(self, msg: str) -> None:
+        if self._log:
+            self._log(msg)
 
     def resolve(self, requests: list[PortRequestData]) -> EndpointData:
         host = self.host
@@ -88,22 +93,48 @@ class CommandSource(IPortSource):
             except FyrWireError:
                 partial.add(req.key)
                 continue
-            m = re.search(r"([A-Za-z0-9_.:-]+):(\d{1,5})\b", out)
-            if m:
-                host = host or m.group(1)
-                ports[req.key] = int(m.group(2))
-                continue
-            m = re.search(r"\b(\d{1,5})\b", out)
-            if m:
-                ports[req.key] = int(m.group(1))
-            else:
+            line = out.strip()
+            m = re.fullmatch(r"(?:([A-Za-z0-9_.\-]+):)?(\d{1,5})", line)
+            if not m:
+                self.log(
+                    f"{req.key}: the command printed {line[:80]!r} — it must "
+                    f"print ONLY a port, or host:port, with nothing else")
                 partial.add(req.key)
+                continue
+            port = int(m.group(2))
+            if not (1 <= port <= 65535):
+                self.log(f"{req.key}: {port} is not a port (1..65535)")
+                partial.add(req.key)
+                continue
+            if m.group(1) and not host:
+                host = m.group(1)
+            ports[req.key] = port
 
         if not host:
             raise FyrWireError("command source produced no host (set host or host_command)")
         if not ports:
             raise FyrWireError("command source produced no ports")
         return EndpointData(host, ports, partial)
+
+
+def _unroutable(addr: str) -> str:
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return "it is not a valid address"
+    if ip.is_unspecified:
+        return "it is the unspecified address"
+    if ip.is_loopback:
+        return "it is a loopback address"
+    if ip.is_private:
+        return "it is a private address (RFC 1918)"
+    if ip.is_link_local:
+        return "it is a link-local address"
+    if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"):
+        return ("it is in the carrier-grade NAT range (100.64.0.0/10), so your "
+                "provider is NATing you and the port is not yours to forward")
+    return ""
 
 
 @register("natpmp")
@@ -179,6 +210,10 @@ class NatPmpSource(IPortSource):
                      f"granted {secs}s — the agent must reconcile more often than "
                      f"that or the mapping lapses")
 
+    def bind_address(self) -> str | None:
+        from . import hostinfo
+        return hostinfo.local_address_toward(self.gateway)
+
     def took_restart(self) -> bool:
         was, self.restarted = self.restarted, False
         return was
@@ -195,6 +230,11 @@ class NatPmpSource(IPortSource):
     def resolve(self, requests: list[PortRequestData]) -> EndpointData:
         pub = self._rpc(struct.pack(">BB", 0, 0), 128)
         host = socket.inet_ntoa(pub[8:12])
+        why = _unroutable(host)
+        if why:
+            self.log(f"the gateway reports {host} as your public address, but "
+                     f"{why} — anything published will resolve to an address "
+                     f"the internet cannot route to")
 
         ports: dict[str, int] = {}
         partial: set[str] = set()

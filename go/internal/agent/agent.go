@@ -90,6 +90,18 @@ type Agent struct {
 	opt       OptionsData
 	relays    *relay.Manager
 	lastWrite time.Time
+	warned    map[string]bool
+}
+
+func (a *Agent) warnOnce(msg string) {
+	if a.warned == nil {
+		a.warned = map[string]bool{}
+	}
+	if a.warned[msg] {
+		return
+	}
+	a.warned[msg] = true
+	a.opt.Log(msg)
 }
 
 const writeSpacing = 550 * time.Millisecond
@@ -306,7 +318,18 @@ func (a *Agent) syncRelays(res model.EndpointData) ([]string, map[string]string)
 	}
 	bind := a.opt.BindHost
 	if bind == "" {
-		bind = hostinfo.EgressAddress()
+
+		if b, ok := a.src.(interface{ BindAddress() string }); ok {
+			bind = b.BindAddress()
+		}
+		if egress := hostinfo.EgressAddress(); bind == "" {
+			bind = egress
+		} else if egress != "" && egress != bind {
+			a.warnOnce(fmt.Sprintf(
+				"binding %s (where the port forward arrives) rather than %s "+
+					"(the route to the internet) — they differ on this host",
+				bind, egress))
+		}
 	}
 	if bind == "" {
 		a.opt.Log("relay: no tunnel address found; skipping")
@@ -376,6 +399,22 @@ func (a *Agent) Run(interval time.Duration, jitter time.Duration, maxCycles int)
 		}
 		if maxCycles > 0 && n+1 >= maxCycles {
 			return
+		}
+
+		if lease, ok := a.src.(interface{ GrantedLifetime() int }); ok {
+			if secs := lease.GrantedLifetime(); secs > 0 {
+				safe := time.Duration(secs) * time.Second * 2 / 3
+				if wait > safe {
+					a.warnOnce(fmt.Sprintf(
+						"the gateway grants only %ds, so reconciling every %s "+
+							"instead of %s to keep the mapping alive",
+						secs, safe, wait))
+					wait = safe
+				}
+				if jitter > safe/2 {
+					jitter = safe / 2
+				}
+			}
 		}
 		if jitter > 0 {
 

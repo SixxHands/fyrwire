@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sixxhands/fyrwire/internal/config"
@@ -18,6 +19,10 @@ type CloudflareProvider struct {
 
 	ids     map[string]string
 	baseURL string
+
+	zoneName string
+	zoneErr  error
+	zoneOnce sync.Once
 }
 
 const cloudflareAPI = "https://api.cloudflare.com/client/v4"
@@ -26,6 +31,45 @@ const cloudflareAPI = "https://api.cloudflare.com/client/v4"
 const Tag = "managed by fyrwire"
 
 func (c *CloudflareProvider) Name() string { return "cloudflare" }
+
+func (c *CloudflareProvider) checkZone(name string) error {
+	c.zoneOnce.Do(func() {
+		raw, err := c.call("GET", "/zones/"+c.Zone, nil)
+		if err != nil {
+			c.zoneErr = err
+			return
+		}
+		var z struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(raw, &z); err != nil {
+			c.zoneErr = model.Errorf("cloudflare sent an unreadable zone: %v", err)
+			return
+		}
+		c.zoneName = strings.ToLower(z.Name)
+		if z.Status != "" && z.Status != "active" {
+
+			c.zoneErr = model.Errorf(
+				"cloudflare zone %s is %q, not active — records written to it "+
+					"will be accepted and will never resolve until the "+
+					"nameservers are delegated", z.Name, z.Status)
+		}
+	})
+	if c.zoneErr != nil {
+		return c.zoneErr
+	}
+	if c.zoneName == "" {
+		return nil
+	}
+	n := strings.ToLower(strings.TrimSuffix(name, "."))
+	if n != c.zoneName && !strings.HasSuffix(n, "."+c.zoneName) {
+		return model.Errorf(
+			"%q is not inside the zone %q that zone_id points at — the record "+
+				"would be accepted and would never resolve", name, c.zoneName)
+	}
+	return nil
+}
 
 func (c *CloudflareProvider) api() string {
 	if c.baseURL != "" {
@@ -125,6 +169,9 @@ func (c *CloudflareProvider) find(rtype, name string) (*cfRecord, error) {
 }
 
 func (c *CloudflareProvider) upsert(rec cfRecord) (string, error) {
+	if err := c.checkZone(rec.Name); err != nil {
+		return "", err
+	}
 	key := rec.Type + "|" + rec.Name
 	existing, err := c.find(rec.Type, rec.Name)
 	if err != nil {
@@ -154,6 +201,14 @@ func (c *CloudflareProvider) upsert(rec cfRecord) (string, error) {
 }
 
 func (c *CloudflareProvider) matches(existing *cfRecord, want cfRecord) bool {
+
+	if !strings.EqualFold(strings.TrimSuffix(existing.Name, "."),
+		strings.TrimSuffix(want.Name, ".")) {
+		return false
+	}
+	if existing.Type != want.Type {
+		return false
+	}
 	if existing.TTL != want.TTL {
 		return false
 	}

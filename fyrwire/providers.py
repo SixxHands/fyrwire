@@ -130,6 +130,8 @@ class CloudflareProvider(IDnsProvider):
             raise FyrWireError("cloudflare provider needs api_token and zone_id")
         self.token, self.zone, self.timeout = api_token, zone_id, int(timeout)
         self._ids: dict[tuple[str, str], str] = {}
+        self._zone_name: str | None = None
+        self._zone_checked = False
 
     def _call(self, method: str, path: str, body: dict | None = None) -> dict:
         data = json.dumps(body).encode() if body is not None else None
@@ -164,7 +166,28 @@ class CloudflareProvider(IDnsProvider):
             return rec["id"], rec
         return None, None
 
+    def _check_zone(self, name: str) -> None:
+        if not self._zone_checked:
+            self._zone_checked = True
+            res = self._call("GET", f"/zones/{self.zone}").get("result") or {}
+            self._zone_name = (res.get("name") or "").lower() or None
+            status = res.get("status")
+            if status and status != "active":
+                raise FyrWireError(
+                    f"cloudflare zone {self._zone_name} is {status!r}, not "
+                    f"active — records written to it will be accepted and will "
+                    f"never resolve until the nameservers are delegated")
+        if not self._zone_name:
+            return
+        n = name.rstrip(".").lower()
+        if n != self._zone_name and not n.endswith("." + self._zone_name):
+            raise FyrWireError(
+                f"{name!r} is not inside the zone {self._zone_name!r} that "
+                f"zone_id points at — the record would be accepted and would "
+                f"never resolve")
+
     def _upsert(self, rtype: str, name: str, content, ttl: int, comment: str) -> str | None:
+        self._check_zone(name)
         key = (rtype, name)
         rid = self._ids.get(key)
         existing = None
@@ -185,7 +208,7 @@ class CloudflareProvider(IDnsProvider):
         else:
             body["content"] = content
 
-        if rid and existing and self._matches(rtype, existing, content, ttl):
+        if rid and existing and self._matches(rtype, existing, content, ttl, name):
             return None
 
         if rid:
@@ -196,7 +219,14 @@ class CloudflareProvider(IDnsProvider):
         return f"created {rtype} {name}"
 
     @staticmethod
-    def _matches(rtype: str, existing: dict, content, ttl: int) -> bool:
+    def _matches(rtype: str, existing: dict, content, ttl: int,
+                 name: str | None = None) -> bool:
+        if existing.get("type") not in (None, rtype):
+            return False
+        if name is not None:
+            got = str(existing.get("name") or "").rstrip(".").lower()
+            if got and got != name.rstrip(".").lower():
+                return False
         if existing.get("ttl") != ttl:
             return False
         if rtype == "HTTPS":

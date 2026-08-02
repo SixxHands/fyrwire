@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sixxhands/fyrwire/internal/config"
+	"github.com/sixxhands/fyrwire/internal/hostinfo"
 	"github.com/sixxhands/fyrwire/internal/model"
 )
 
@@ -138,7 +139,38 @@ func (n *NatPmpSource) PublicAddress() (string, error) {
 	if err := checkResult(reply, opPublicAddr); err != nil {
 		return "", err
 	}
-	return net.IP(reply[8:12]).String(), nil
+	addr := net.IP(reply[8:12]).String()
+	if why := unroutable(addr); why != "" {
+
+		n.warnOnce("the gateway reports %s as your public address, but %s — "+
+			"anything published will resolve to an address the internet "+
+			"cannot route to", addr, why)
+	}
+	return addr, nil
+}
+
+func unroutable(addr string) string {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return "it is not a valid address"
+	}
+	if ip.IsUnspecified() {
+		return "it is the unspecified address"
+	}
+	if ip.IsLoopback() {
+		return "it is a loopback address"
+	}
+	if ip.IsPrivate() {
+		return "it is a private address (RFC 1918)"
+	}
+	if ip.IsLinkLocalUnicast() {
+		return "it is a link-local address"
+	}
+	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1]&0xC0 == 64 {
+		return "it is in the carrier-grade NAT range (100.64.0.0/10), so your " +
+			"provider is NATing you and the port is not yours to forward"
+	}
+	return ""
 }
 
 func (n *NatPmpSource) mapRaw(internal int, protocol string) (gotInternal, external int, err error) {
@@ -195,6 +227,10 @@ func (n *NatPmpSource) TookRestart() bool {
 	was := n.Restarted
 	n.Restarted = false
 	return was
+}
+
+func (n *NatPmpSource) BindAddress() string {
+	return hostinfo.LocalAddressToward(n.Gateway)
 }
 
 func (n *NatPmpSource) GrantedLifetime() int { return n.granted }

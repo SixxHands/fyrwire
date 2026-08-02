@@ -1,6 +1,7 @@
 package source
 
 import (
+	"net"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -79,7 +80,8 @@ func (c *CommandSource) Resolve(reqs []model.PortRequestData) (model.EndpointDat
 	if err != nil {
 		return model.EndpointData{}, err
 	}
-	if host == "" {
+
+	if c.Host != "" || c.HostCommand != "" {
 		host = c.Host
 		if c.HostCommand != "" {
 			h, err := run(c.HostCommand, c.Timeout)
@@ -108,18 +110,53 @@ func parseEndpoint(s string) (string, int, error) {
 	if s == "" {
 		return "", 0, model.Errorf("the source command printed nothing")
 	}
+	if strings.ContainsAny(s, " \t") {
+		return "", 0, model.Errorf(
+			"the source command printed %q — it must print ONLY a port, or "+
+				"host:port, with nothing else on the line", truncateLine(s))
+	}
+	host := ""
+	portStr := s
 	if i := strings.LastIndex(s, ":"); i >= 0 {
-		port, err := strconv.Atoi(strings.TrimSpace(s[i+1:]))
-		if err != nil {
-			return "", 0, model.Errorf("cannot read a port from %q", s)
+		host, portStr = strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, model.Errorf(
+			"cannot read a port from %q — a port is 1..65535", truncateLine(s))
+	}
+	if host != "" && !plausibleHost(host) {
+		return "", 0, model.Errorf(
+			"%q does not look like an address or hostname", host)
+	}
+	return host, port, nil
+}
+
+func truncateLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 80 {
+		s = s[:80] + "…"
+	}
+	return s
+}
+
+func plausibleHost(h string) bool {
+	if net.ParseIP(h) != nil {
+		return true
+	}
+	if len(h) > 253 {
+		return false
+	}
+	for _, r := range h {
+		if !(r == '.' || r == '-' || r == '_' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9')) {
+			return false
 		}
-		return strings.TrimSpace(s[:i]), port, nil
 	}
-	port, err := strconv.Atoi(s)
-	if err != nil {
-		return "", 0, model.Errorf("cannot read a port from %q", s)
-	}
-	return "", port, nil
+	return strings.Contains(h, ".")
 }
 
 func run(cmdline string, timeout int) (string, error) {

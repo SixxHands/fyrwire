@@ -70,6 +70,14 @@ class Agent:
 
     WRITE_SPACING = 0.55
 
+    def _warn_once(self, msg: str) -> None:
+        if not hasattr(self, "_warned"):
+            self._warned = set()
+        if msg in self._warned:
+            return
+        self._warned.add(msg)
+        self.log(msg)
+
     def _paced(self, fn, *a, **kw):
         gap = time.monotonic() - self._last_write
         if gap < self.WRITE_SPACING:
@@ -83,7 +91,19 @@ class Agent:
         failed: dict[str, str] = {}
         if self.relays is None:
             return [], failed
-        bind = self.bind_host or tunnel_address()
+        bind = self.bind_host
+        if not bind:
+            getter = getattr(self.source, "bind_address", None)
+            if getter:
+                bind = getter()
+            egress = tunnel_address()
+            if not bind:
+                bind = egress
+            elif egress and egress != bind:
+                self._warn_once(
+                    f"binding {bind} (where the port forward arrives) rather "
+                    f"than {egress} (the route to the internet) — they differ "
+                    f"on this host")
         if not bind:
             self.log("relay: no tunnel address found; skipping")
             return [], failed
@@ -253,6 +273,15 @@ class Agent:
             except Exception as e:
                 self.log(f"unexpected error: {e!r}")
                 self.log(traceback.format_exc().rstrip())
+            granted = getattr(self.source, "granted_lifetime", 0) or 0
+            if granted > 0:
+                safe = granted * 2 // 3
+                if wait > safe:
+                    self._warn_once(
+                        f"the gateway grants only {granted}s, so reconciling "
+                        f"every {safe}s instead of {wait}s to keep the mapping "
+                        f"alive")
+                    wait = safe
             n += 1
             if max_cycles is None or n < max_cycles:
                 time.sleep(wait)

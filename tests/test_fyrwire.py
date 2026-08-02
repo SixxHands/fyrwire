@@ -659,7 +659,7 @@ class FakeCloudflare(CloudflareProvider):
     def _call(self, method, path, body=None):
         if method == "DELETE":
             self.deleted.append(path)
-        return {"success": True, "result": {}}
+        return {"success": True, "result": {"id": "new123"}}
 
 
 class TestOwnershipWitness(unittest.TestCase):
@@ -1985,3 +1985,61 @@ class TestAuditFixes(unittest.TestCase):
                             log=logged.append)
         n.send("t", "b")
         self.assertTrue(any("7" in m for m in logged), logged)
+
+
+class TestAuditFixesTwo(unittest.TestCase):
+
+    def test_a_timestamped_log_line_is_not_parsed_into_dns(self):
+        from fyrwire.sources import CommandSource
+        src = CommandSource(
+            command="printf '%s' '2026-08-01 12:00:00 forwarded port 25565'",
+            host="1.2.3.4", log=lambda *_: None)
+        with self.assertRaises(FyrWireError):
+            src.resolve([MC.request()])
+
+    def test_a_bare_port_and_host_port_still_work(self):
+        from fyrwire.sources import CommandSource
+        for out in ("25565", "203.0.113.9:25565"):
+            src = CommandSource(command=f"printf '%s' '{out}'", host="1.2.3.4",
+                                log=lambda *_: None)
+            r = src.resolve([MC.request()])
+            self.assertEqual(r.ports["minecraft"], 25565, out)
+
+    def test_explicit_host_config_beats_whatever_the_command_printed(self):
+        from fyrwire.sources import CommandSource
+        src = CommandSource(command="printf '%s' '10.2.0.1:25565'",
+                            host="203.0.113.9", log=lambda *_: None)
+        self.assertEqual(src.resolve([MC.request()]).host, "203.0.113.9",
+                         "a configured public address must not be silently "
+                         "replaced by a gateway address scraped from output")
+
+    def test_an_unroutable_public_address_is_recognised(self):
+        from fyrwire.sources import _unroutable
+        self.assertEqual(_unroutable("203.0.113.49"), "")
+        for bad in ("192.168.1.5", "10.0.0.1", "127.0.0.1", "0.0.0.0"):
+            self.assertTrue(_unroutable(bad), bad)
+        self.assertIn("carrier-grade", _unroutable("100.70.1.2"))
+
+    def test_a_name_outside_the_zone_is_refused(self):
+        cf = FakeCloudflare()
+        cf._zone_checked = True
+        cf._zone_name = "example.com"
+        with self.assertRaises(FyrWireError) as cm:
+            cf.ensure_a("node.elsewhere.org", "1.2.3.4", 60)
+        self.assertIn("not inside", str(cm.exception))
+        cf.ensure_a("node.example.com", "1.2.3.4", 60)
+
+    def test_a_record_renamed_behind_our_back_is_not_reported_as_correct(self):
+        from fyrwire.providers import CloudflareProvider as CP
+        existing = {"type": "A", "name": "old.example.com", "ttl": 60,
+                    "content": "1.2.3.4"}
+        self.assertFalse(CP._matches("A", existing, "1.2.3.4", 60,
+                                     "new.example.com"))
+        self.assertTrue(CP._matches("A", existing, "1.2.3.4", 60,
+                                    "old.example.com"))
+
+    def test_the_relay_binds_toward_the_gateway_not_the_default_route(self):
+        from fyrwire import sources
+        src = sources.NatPmpSource(gateway="127.0.0.1")
+        self.assertEqual(src.bind_address(), "127.0.0.1",
+                         "the bind must follow the route to the gateway")

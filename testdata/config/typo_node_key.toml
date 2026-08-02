@@ -1,0 +1,24 @@
+#EXPECT reject
+#CONTAINS relayy
+#CONTAINS did you mean
+
+
+[source]
+type = "natpmp"
+gateway = "10.2.0.1"
+
+[provider]
+type = "cloudflare"
+api_token = "env:FYRWIRE_CF_TOKEN"
+zone_id = "abc123"
+
+[node]
+a_name = "node.example.com"
+ttl = 60
+relayy = true
+
+[[service]]
+name = "minecraft"
+internal_port = 25565
+srv_name = "_minecraft._tcp.play.example.com"
+

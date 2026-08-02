@@ -1,0 +1,23 @@
+#EXPECT reject
+#CONTAINS did you mean
+#CONTAINS cloudflare
+
+[source]
+type = "natpmp"
+gateway = "10.2.0.1"
+
+[provider]
+type = "clouflare"
+api_token = "env:FYRWIRE_CF_TOKEN"
+zone_id = "abc123"
+
+[node]
+a_name = "node.example.com"
+ttl = 60
+
+
+[[service]]
+name = "minecraft"
+internal_port = 25565
+srv_name = "_minecraft._tcp.play.example.com"
+

@@ -1587,3 +1587,47 @@ class TestDesecFailureHandling(unittest.TestCase):
                        "data": {"target": "Node.Example.COM"}}]
         self.assertIsNotNone(
             cf.delete("SRV", "s.example.com", expect="node.example.com"))
+
+
+CORPUS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "testdata", "config")
+
+
+def _corpus_cases():
+    if not os.path.isdir(CORPUS):
+        return []
+    return sorted(f for f in os.listdir(CORPUS) if f.endswith(".toml"))
+
+
+class TestSharedConfigCorpus(unittest.TestCase):
+    def test_the_corpus_is_not_empty(self):
+        self.assertGreater(len(_corpus_cases()), 10)
+
+    def test_every_case_behaves_as_declared(self):
+        from fyrwire import config
+        failures = []
+        for name in _corpus_cases():
+            with open(os.path.join(CORPUS, name)) as fh:
+                text = fh.read()
+            expect = "accept"
+            contains = []
+            for line in text.splitlines():
+                if line.startswith("#EXPECT"):
+                    expect = line.split(None, 1)[1].strip()
+                elif line.startswith("#CONTAINS"):
+                    contains.append(line.split(None, 1)[1].strip())
+            try:
+                config.validate(tomllib.loads(text))
+                got, msg = "accept", ""
+            except FyrWireError as e:
+                got, msg = "reject", str(e)
+            except Exception as e:
+                failures.append(f"{name}: crashed with {type(e).__name__}: {e}")
+                continue
+            if got != expect:
+                failures.append(f"{name}: expected {expect}, got {got} ({msg})")
+                continue
+            for c in contains:
+                if c.lower() not in msg.lower():
+                    failures.append(f"{name}: message must mention {c!r}, got {msg!r}")
+        self.assertEqual(failures, [], "\n  " + "\n  ".join(failures))

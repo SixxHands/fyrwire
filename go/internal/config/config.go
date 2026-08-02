@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -149,14 +151,19 @@ func Load(path string) (*Config, error) {
 }
 
 func Parse(text string) (*Config, error) {
-	var cfg Config
-	md, err := toml.Decode(text, &cfg)
-	if err != nil {
+
+	var raw map[string]any
+	if _, err := toml.Decode(text, &raw); err != nil {
 		return nil, model.Errorf("not valid TOML: %v", err)
 	}
-
-	if err := checkUndecoded(md); err != nil {
+	if err := checkStructure(raw); err != nil {
 		return nil, err
+	}
+
+	var cfg Config
+	if _, err := toml.Decode(text, &cfg); err != nil {
+
+		return nil, model.Errorf("not valid TOML: %v", err)
 	}
 	if err := checkVersion(cfg.FyrWire); err != nil {
 		return nil, err
@@ -164,10 +171,10 @@ func Parse(text string) (*Config, error) {
 	if err := checkRequiredSections(&cfg); err != nil {
 		return nil, err
 	}
-	if err := checkSection("source", cfg.Source, SourceOptions); err != nil {
+	if err := checkSection("source", cfg.Source, SourceOptions, "source"); err != nil {
 		return nil, err
 	}
-	if err := checkSection("provider", cfg.Provider, ProviderOptions); err != nil {
+	if err := checkSection("provider", cfg.Provider, ProviderOptions, "provider"); err != nil {
 		return nil, err
 	}
 	if err := checkServices(cfg.Service); err != nil {
@@ -182,42 +189,54 @@ func Parse(text string) (*Config, error) {
 var knownSections = []string{"fyrwire", "source", "provider", "node", "service",
 	"agent", "alerts"}
 
-func checkUndecoded(md toml.MetaData) error {
-	for _, k := range md.Undecoded() {
-		parts := k
-		full := parts.String()
+func checkStructure(raw map[string]any) error {
+	top := schemaOf(reflect.TypeOf(Config{}))
+	for key, value := range raw {
+		spec, ok := top[key]
+		if !ok {
+			return model.Errorf("unknown section [%s]%s", key,
+				suggest(key, knownSections))
+		}
+		switch key {
+		case "source", "provider":
 
-		if len(parts) > 0 && (parts[0] == "source" || parts[0] == "provider") {
+			if _, isTable := value.(map[string]any); !isTable {
+				return model.Errorf(
+					"[%s] must be a table; got %s. Write it as [%s] with keys "+
+						"underneath, not %s = ...", key, humanKind(tomlKind(value)),
+					key, key)
+			}
+			continue
+		case "service":
+			list, ok := value.([]map[string]any)
+			if !ok {
+				return model.Errorf(
+					"services must be written as [[service]] (double brackets), " +
+						"one table per service")
+			}
+			for i, svc := range list {
+				if err := checkTable(fmtIndex(key, i), svc, spec.sub); err != nil {
+					return err
+				}
+			}
 			continue
 		}
-		if len(parts) == 1 {
-			return model.Errorf("unknown section [%s]%s", full,
-				suggest(full, knownSections))
+		table, ok := value.(map[string]any)
+		if !ok {
+			return model.Errorf(
+				"[%s] must be a table; got %s. Write it as [%s] with keys "+
+					"underneath, not %s = ...", key, humanKind(tomlKind(value)),
+				key, key)
 		}
-		known := siblingKeys(md, parts)
-		return model.Errorf("unknown key %s%s", full, suggest(parts[len(parts)-1], known))
+		if err := checkTable(key, table, spec.sub); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func siblingKeys(md toml.MetaData, key toml.Key) []string {
-	prefix := strings.Join(key[:len(key)-1], ".")
-	seen := map[string]bool{}
-	var out []string
-	for _, k := range md.Keys() {
-		if len(k) != len(key) {
-			continue
-		}
-		if strings.Join(k[:len(k)-1], ".") != prefix {
-			continue
-		}
-		last := k[len(k)-1]
-		if !seen[last] {
-			seen[last] = true
-			out = append(out, last)
-		}
-	}
-	return out
+func fmtIndex(name string, i int) string {
+	return name + "[" + strconv.Itoa(i) + "]"
 }
 
 func checkVersion(m Meta) error {
@@ -253,11 +272,19 @@ func checkRequiredSections(cfg *Config) error {
 	return nil
 }
 
-func checkSection(where string, sec Section, registry map[string][]OptionRule) error {
-	t := sec.Type()
-	if t == "" {
+func checkSection(where string, sec Section, registry map[string][]OptionRule,
+	kind string) error {
+	rawType, present := sec["type"]
+	if !present {
 		return model.Errorf("[%s] needs a `type` key; available: %s",
 			where, strings.Join(sortedKeys(registry), ", "))
+	}
+	t, isString := rawType.(string)
+	if !isString {
+
+		return model.Errorf(
+			"%s.type must be a string naming a %s; available: %s",
+			where, kind, strings.Join(sortedKeys(registry), ", "))
 	}
 	opts, ok := registry[t]
 	if !ok {

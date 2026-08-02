@@ -238,8 +238,15 @@ def validate(cfg: dict) -> dict:
     if not isinstance(cfg["service"], list):
         raise FyrWireError("services must be written as [[service]] (double "
                            "brackets), one table per service")
+    seen: set[str] = set()
     for i, svc in enumerate(cfg["service"]):
+        if not isinstance(svc, dict):
+            raise FyrWireError(f"service[{i}] must be a table")
         _check_table(f"service[{i}]", svc, SERVICE_KEYS)
+        name = svc.get("name")
+        if name in seen:
+            raise FyrWireError(f"duplicate service name {name!r}")
+        seen.add(name)
 
     if "agent" in cfg:
         _check_table("agent", cfg["agent"], AGENT_KEYS)

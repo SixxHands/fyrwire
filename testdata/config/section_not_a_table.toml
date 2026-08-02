@@ -1,0 +1,4 @@
+#EXPECT reject
+#CONTAINS table
+
+node = 5

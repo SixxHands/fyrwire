@@ -1,0 +1,12 @@
+#EXPECT reject
+#CONTAINS service
+
+[source]
+type = "natpmp"
+gateway = "10.2.0.1"
+[provider]
+type = "cloudflare"
+api_token = "t"
+zone_id = "z"
+[node]
+a_name = "n.example.com"

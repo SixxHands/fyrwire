@@ -76,6 +76,8 @@ type AlertStatusData struct {
 	Skipped  []string
 	Failures int
 	KeptPort map[string]int
+
+	Reasons map[string]string
 }
 
 type AlertState struct {
@@ -131,8 +133,13 @@ func (n *Notifier) Evaluate(s AlertStatusData, st *AlertState, node string) []st
 	}
 	for _, k := range sortedKeys(nowSkipped) {
 		if !known[k] {
-			n.send(node+" — "+k+" has no mapping",
-				"Its record is unchanged; the other services are fine.", amber)
+			why := "the gateway granted it no port"
+			if r, ok := s.Reasons[k]; ok && r != "" {
+				why = r
+			}
+			n.send(node+" — "+k+" is not being published",
+				why+".\n\nIts record is unchanged; the other services are fine.",
+				amber)
 			sent = append(sent, "service-down:"+k)
 		}
 	}

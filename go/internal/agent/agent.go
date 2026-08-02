@@ -116,10 +116,12 @@ func (a *Agent) paced(fn func() (string, error)) (string, error) {
 }
 
 type TickResult struct {
-	OK        bool
-	Host      string
-	Changes   []string
-	Skipped   []string
+	OK      bool
+	Host    string
+	Changes []string
+	Skipped []string
+
+	Reasons   map[string]string
 	Err       error
 	Unchanged bool
 }
@@ -154,14 +156,18 @@ func (a *Agent) Tick(force bool) TickResult {
 	changes = append(changes, relayChanges...)
 
 	skip := map[string]bool{}
+	reasons := map[string]string{}
 	for k := range res.Partial {
 		skip[k] = true
+		reasons[k] = "the gateway granted it no port"
 	}
-	for key := range relayFailed {
+	for key, why := range relayFailed {
 		if !skip[key] {
-			skip[key] = true
 			skipped = append(skipped, key)
 		}
+		skip[key] = true
+
+		reasons[key] = why
 	}
 	sort.Strings(skipped)
 
@@ -219,7 +225,7 @@ func (a *Agent) Tick(force bool) TickResult {
 		a.State.LastPorts[svc.Key] = port
 	}
 
-	a.alert(TickResult{OK: true, Host: res.Host, Skipped: skipped})
+	a.alert(TickResult{OK: true, Host: res.Host, Skipped: skipped, Reasons: reasons})
 
 	if len(changes) > 0 {
 		a.State.TotalPublishes++
@@ -228,7 +234,7 @@ func (a *Agent) Tick(force bool) TickResult {
 
 	_ = a.State.Save(a.statePath)
 	return TickResult{OK: true, Host: res.Host, Changes: changes, Skipped: skipped,
-		Unchanged: len(changes) == 0}
+		Reasons: reasons, Unchanged: len(changes) == 0}
 }
 
 // Never wipe DNS on a bad cycle. A VPN blip should leave the last working port alone instead of taking everything down.
@@ -254,13 +260,14 @@ func (a *Agent) alert(r TickResult) {
 	}
 	a.opt.Notifier.Evaluate(notify.AlertStatusData{
 		OK: r.OK, Host: r.Host, Error: errText, Skipped: r.Skipped,
+		Reasons:  r.Reasons,
 		Failures: a.State.ConsecutiveFailures, KeptPort: a.State.LastPorts,
 	}, st, a.opt.NodeName)
 	a.State.AlertedDown, a.State.AlertedServices = st.Down, st.Services
 }
 
-func (a *Agent) syncRelays(res model.EndpointData) ([]string, map[string]bool) {
-	failed := map[string]bool{}
+func (a *Agent) syncRelays(res model.EndpointData) ([]string, map[string]string) {
+	failed := map[string]string{}
 	if a.relays == nil {
 		return nil, failed
 	}
@@ -288,9 +295,12 @@ func (a *Agent) syncRelays(res model.EndpointData) ([]string, map[string]bool) {
 	}
 	changes := a.relays.Sync(wanted)
 	live := a.relays.Stats()
-	for key := range wanted {
+	for key, spec := range wanted {
 		if _, ok := live[key]; !ok {
-			failed[key] = true
+			failed[key] = fmt.Sprintf(
+				"its relay could not bind %s:%d — something else is already "+
+					"using that port, or the address is not on this machine",
+				spec.BindHost, spec.BindPort)
 		}
 	}
 	return changes, failed

@@ -78,7 +78,7 @@ class Agent:
             self._last_write = time.monotonic()
 
     def _sync_relays(self, res) -> tuple[list[str], set[str]]:
-        failed: set[str] = set()
+        failed: dict[str, str] = {}
         if self.relays is None:
             return [], failed
         bind = self.bind_host or tunnel_address()
@@ -99,9 +99,12 @@ class Agent:
 
         changes = list(self.relays.sync(wanted))
         live = self.relays.stats()
-        for key in wanted:
+        for key, spec in wanted.items():
             if key not in live:
-                failed.add(key)
+                failed[key] = (
+                    f"its relay could not bind {spec[0]}:{spec[1]} — something "
+                    f"else is already using that port, or the address is not "
+                    f"on this machine")
         return changes, failed
 
     def tick(self, force: bool = False) -> dict:
@@ -129,9 +132,11 @@ class Agent:
         changes: list[str] = []
         skip = set(res.partial)
 
+        reasons = {k: "the gateway granted it no port" for k in res.partial}
         relay_changes, relay_failed = self._sync_relays(res)
         changes.extend(relay_changes)
-        skip |= relay_failed
+        skip |= set(relay_failed)
+        reasons.update(relay_failed)
         skipped = sorted(skip)
         self._last_write = 0.0
 
@@ -178,7 +183,8 @@ class Agent:
             self.log(f"unresolved this cycle (records left alone): {', '.join(skipped)}")
 
         report = {"ok": True, "at": stamp, "host": res.host,
-                  "ports": dict(res.ports), "changes": changes, "skipped": skipped}
+                  "ports": dict(res.ports), "changes": changes, "skipped": skipped,
+                  "reasons": reasons}
         self._alert(report)
         self.state.save(self.state_path)
         return report

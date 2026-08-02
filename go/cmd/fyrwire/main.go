@@ -31,6 +31,8 @@ const (
 	cWarn  = "\x1b[38;2;240;190;90m"
 )
 
+var version = "dev"
+
 var useColour = os.Getenv("NO_COLOR") == "" && isTTY()
 
 func isTTY() bool {
@@ -91,7 +93,8 @@ func main() {
 	case "uninstall":
 		err = install.Uninstall(logln)
 	case "version":
-		fmt.Println(banner.Render(useColour))
+		fmt.Print(banner.Render(useColour))
+		fmt.Printf("\n  %s\n", paint(cDim, version))
 		return
 	default:
 		err = model.Errorf("unknown command %q — try `fyrwire -h`", args[0])

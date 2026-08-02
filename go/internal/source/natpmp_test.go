@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -402,7 +403,9 @@ func TestTheGrantedLeaseIsReadNotAssumed(t *testing.T) {
 }
 
 func TestAGatewayRestartIsDetectedAndForcesARepublish(t *testing.T) {
-	epoch := uint32(5000)
+
+	var epoch atomic.Uint32
+	epoch.Store(5000)
 	addr := fakeGateway(t, func(req []byte) []byte {
 		var r []byte
 		if req[1] == opPublicAddr {
@@ -410,7 +413,7 @@ func TestAGatewayRestartIsDetectedAndForcesARepublish(t *testing.T) {
 		} else {
 			r = mapReply(req[1], binary.BigEndian.Uint16(req[4:6]), 40000)
 		}
-		binary.BigEndian.PutUint32(r[4:8], epoch)
+		binary.BigEndian.PutUint32(r[4:8], epoch.Load())
 		return r
 	})
 	host, port := addrPort(t, addr)
@@ -423,12 +426,12 @@ func TestAGatewayRestartIsDetectedAndForcesARepublish(t *testing.T) {
 	if n.TookRestart() {
 		t.Fatal("no restart has happened yet")
 	}
-	epoch = 6000
+	epoch.Store(6000)
 	n.Map(25565, "tcp")
 	if n.TookRestart() {
 		t.Fatal("a rising epoch is not a restart")
 	}
-	epoch = 12
+	epoch.Store(12)
 	n.Map(25565, "tcp")
 	if !n.TookRestart() {
 		t.Fatal("an epoch going backwards means every mapping was lost")

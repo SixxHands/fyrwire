@@ -80,11 +80,13 @@ class Notifier:
             sent.append("recovered")
 
         skipped = set(report.get("skipped") or [])
+        reasons = report.get("reasons") or {}
         known = set(getattr(state, "alerted_services", []) or [])
         for key in sorted(skipped - known):
-            self.send(f"{node_name} — {key} has no mapping",
-                      "Its record is unchanged; the other services are fine.",
-                      _AMBER)
+            why = reasons.get(key) or "the gateway granted it no port"
+            self.send(f"{node_name} — {key} is not being published",
+                      f"{why}.\n\nIts record is unchanged; the other services "
+                      f"are fine.", _AMBER)
             sent.append(f"service-down:{key}")
         for key in sorted(known - skipped):
             self.send(f"{node_name} — {key} is back",

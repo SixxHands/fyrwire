@@ -12,6 +12,7 @@ import (
 
 	"github.com/sixxhands/fyrwire/internal/hostinfo"
 	"github.com/sixxhands/fyrwire/internal/model"
+	"github.com/sixxhands/fyrwire/internal/notify"
 	"github.com/sixxhands/fyrwire/internal/provider"
 	"github.com/sixxhands/fyrwire/internal/relay"
 	"github.com/sixxhands/fyrwire/internal/source"
@@ -68,6 +69,9 @@ type OptionsData struct {
 	UDP        relay.UdpOptionsData
 	Log        func(string)
 	Now        func() time.Time
+
+	Notifier *notify.Notifier
+	NodeName string
 }
 
 type Agent struct {
@@ -102,8 +106,10 @@ func New(src source.IPortSource, prov provider.IDnsProvider, plan model.NodePlan
 }
 
 func (a *Agent) paced(fn func() (string, error)) (string, error) {
-	if gap := time.Since(a.lastWrite); gap < writeSpacing {
-		time.Sleep(writeSpacing - gap)
+	if !a.lastWrite.IsZero() {
+		if gap := time.Since(a.lastWrite); gap < writeSpacing {
+			time.Sleep(writeSpacing - gap)
+		}
 	}
 	defer func() { a.lastWrite = time.Now() }()
 	return fn()
@@ -121,11 +127,8 @@ type TickResult struct {
 func (a *Agent) Tick(force bool) TickResult {
 	res, err := a.src.Resolve(a.plan.Requests())
 	if err != nil {
-		a.State.ConsecutiveFailures++
-		a.State.LastError = err.Error()
-		_ = a.State.Save(a.statePath)
 
-		return TickResult{OK: false, Err: err, Host: a.State.LastHost}
+		return a.fail(err, a.State.LastHost)
 	}
 	if a.State.ConsecutiveFailures > 0 {
 		a.opt.Log(fmt.Sprintf("recovered after %d failure(s)",
@@ -133,6 +136,8 @@ func (a *Agent) Tick(force bool) TickResult {
 	}
 	a.State.ConsecutiveFailures = 0
 	a.State.LastError = ""
+
+	a.lastWrite = time.Time{}
 
 	var changes []string
 	skipped := make([]string, 0, len(res.Partial))
@@ -195,11 +200,13 @@ func (a *Agent) Tick(force bool) TickResult {
 	}
 
 	changes = append(changes, a.syncRelays(res)...)
+	a.alert(TickResult{OK: true, Host: res.Host, Skipped: skipped})
 
 	if len(changes) > 0 {
 		a.State.TotalPublishes++
 		a.State.LastChangeAt = a.opt.Now().UTC().Format(time.RFC3339)
 	}
+
 	_ = a.State.Save(a.statePath)
 	return TickResult{OK: true, Host: res.Host, Changes: changes, Skipped: skipped,
 		Unchanged: len(changes) == 0}
@@ -209,8 +216,28 @@ func (a *Agent) Tick(force bool) TickResult {
 func (a *Agent) fail(err error, host string) TickResult {
 	a.State.ConsecutiveFailures++
 	a.State.LastError = err.Error()
+	r := TickResult{OK: false, Err: err, Host: host}
+
+	a.alert(r)
 	_ = a.State.Save(a.statePath)
-	return TickResult{OK: false, Err: err, Host: host}
+	return r
+}
+
+func (a *Agent) alert(r TickResult) {
+	if a.opt.Notifier == nil {
+		return
+	}
+	st := &notify.AlertState{Down: a.State.AlertedDown,
+		Services: a.State.AlertedServices}
+	errText := ""
+	if r.Err != nil {
+		errText = r.Err.Error()
+	}
+	a.opt.Notifier.Evaluate(notify.AlertStatusData{
+		OK: r.OK, Host: r.Host, Error: errText, Skipped: r.Skipped,
+		Failures: a.State.ConsecutiveFailures, KeptPort: a.State.LastPorts,
+	}, st, a.opt.NodeName)
+	a.State.AlertedDown, a.State.AlertedServices = st.Down, st.Services
 }
 
 func (a *Agent) syncRelays(res model.EndpointData) []string {
@@ -257,8 +284,12 @@ func (a *Agent) Run(interval time.Duration, jitter time.Duration, maxCycles int)
 
 				if backoff == 0 {
 					backoff = interval
-				} else if backoff < 15*time.Minute {
+				} else {
 					backoff *= 2
+				}
+
+				if backoff > 15*time.Minute {
+					backoff = 15 * time.Minute
 				}
 				wait = backoff
 				if rl.RetryAfter > wait {

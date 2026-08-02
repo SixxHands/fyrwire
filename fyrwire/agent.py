@@ -4,7 +4,7 @@ import json
 import os
 import time
 import traceback
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 
 from .models import FyrWireError, HttpsRecordData, NodePlanData, SrvRecordData
@@ -30,9 +30,13 @@ class AgentState:
     def load(cls, path: str) -> "AgentState":
         try:
             with open(path) as fh:
-                return cls(**json.load(fh))
-        except (OSError, json.JSONDecodeError, TypeError):
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
             return cls()
+        if not isinstance(data, dict):
+            return cls()
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

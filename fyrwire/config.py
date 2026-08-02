@@ -243,6 +243,11 @@ def validate(cfg: dict) -> dict:
         if not isinstance(svc, dict):
             raise FyrWireError(f"service[{i}] must be a table")
         _check_table(f"service[{i}]", svc, SERVICE_KEYS)
+        port = svc.get("internal_port")
+        if isinstance(port, int) and not isinstance(port, bool):
+            if not (1 <= port <= 65535):
+                raise FyrWireError(
+                    f"service[{i}].internal_port is {port} — a port is 1..65535")
         name = svc.get("name")
         if name in seen:
             raise FyrWireError(f"duplicate service name {name!r}")

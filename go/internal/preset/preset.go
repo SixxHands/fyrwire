@@ -256,3 +256,13 @@ func errf(format string, a ...any) error {
 type serviceError struct{ msg string }
 
 func (e *serviceError) Error() string { return e.msg }
+
+func init() {
+	registerLookup(func(key string) (string, bool) {
+		p, ok := byKey[key]
+		if !ok {
+			return "", false
+		}
+		return p.Record, true
+	})
+}

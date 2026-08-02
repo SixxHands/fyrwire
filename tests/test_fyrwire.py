@@ -1631,3 +1631,41 @@ class TestSharedConfigCorpus(unittest.TestCase):
                 if c.lower() not in msg.lower():
                     failures.append(f"{name}: message must mention {c!r}, got {msg!r}")
         self.assertEqual(failures, [], "\n  " + "\n  ".join(failures))
+
+
+class TestCrossImplementationState(unittest.TestCase):
+
+    def test_a_go_written_state_file_is_read_not_discarded(self):
+        from fyrwire.agent import AgentState
+        import json as _json
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "state.json")
+            with open(p, "w") as fh:
+                _json.dump({"last_host": "1.2.3.4",
+                            "last_ports": {"mc": 51471},
+                            "consecutive_failures": 0,
+                            "total_publishes": 3,
+                            "last_change_at": "2026-08-01T12:00:00Z",
+                            "last_error": "",
+                            "alerted_down": False,
+                            "alerted_services": []}, fh)
+            st = AgentState.load(p)
+        self.assertEqual(st.last_host, "1.2.3.4",
+                         "an unknown key must not reset the whole file")
+        self.assertEqual(st.last_ports, {"mc": 51471})
+
+    def test_a_corrupt_state_file_still_starts_from_empty(self):
+        from fyrwire.agent import AgentState
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "state.json")
+            with open(p, "w") as fh:
+                fh.write("{not json")
+            self.assertIsNone(AgentState.load(p).last_host)
+
+    def test_a_non_object_state_file_is_not_fatal(self):
+        from fyrwire.agent import AgentState
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "state.json")
+            with open(p, "w") as fh:
+                fh.write("[1,2,3]")
+            self.assertIsNone(AgentState.load(p).last_host)

@@ -65,7 +65,7 @@ func (n *NatPmpSource) exchange(payload []byte, wantLen int) ([]byte, error) {
 			continue
 		}
 
-		wait := time.Duration(timeout*float64(int(1)<<attempt)) * time.Second
+		wait := time.Duration(timeout * float64(int(1)<<attempt) * float64(time.Second))
 		_ = conn.SetDeadline(time.Now().Add(wait))
 		if _, err := conn.Write(payload); err != nil {
 			conn.Close()
@@ -128,6 +128,11 @@ func (n *NatPmpSource) Map(internal int, protocol string) (int, error) {
 	if lifetime <= 0 {
 		lifetime = 120
 	}
+	if internal < 1 || internal > 65535 {
+
+		return 0, model.Errorf(
+			"internal port %d is out of range — a port is 1..65535", internal)
+	}
 	req := make([]byte, 12)
 	req[0], req[1] = natpmpVersion, op
 	binary.BigEndian.PutUint16(req[4:6], uint16(internal))
@@ -142,7 +147,14 @@ func (n *NatPmpSource) Map(internal int, protocol string) (int, error) {
 	if err := checkResult(reply, op); err != nil {
 		return 0, err
 	}
-	return int(binary.BigEndian.Uint16(reply[10:12])), nil
+	granted := int(binary.BigEndian.Uint16(reply[10:12]))
+	if granted == 0 {
+
+		return 0, model.Errorf(
+			"the gateway reported success but granted port 0, which is not a " +
+				"usable mapping")
+	}
+	return granted, nil
 }
 
 func (n *NatPmpSource) Resolve(reqs []model.PortRequestData) (model.EndpointData, error) {

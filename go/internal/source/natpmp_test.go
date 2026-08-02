@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sixxhands/fyrwire/internal/model"
 )
@@ -209,4 +210,56 @@ func natpmpPortOverride(t *testing.T, port int) {
 	prev := natpmpPortForTest
 	natpmpPortForTest = port
 	t.Cleanup(func() { natpmpPortForTest = prev })
+}
+
+func TestAnOutOfRangePortIsRefusedNotWrapped(t *testing.T) {
+	addr := fakeGateway(t, func(req []byte) []byte {
+		return mapReply(req[1], 1, 2)
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
+	for _, bad := range []int{0, -1, 65536, 70000} {
+		if _, err := n.Map(bad, "tcp"); err == nil {
+			t.Errorf("port %d was accepted", bad)
+		}
+	}
+}
+
+func TestAGrantOfPortZeroIsNotAMapping(t *testing.T) {
+	addr := fakeGateway(t, func(req []byte) []byte {
+		if req[1] == opPublicAddr {
+			return publicAddrReply([4]byte{1, 2, 3, 4})
+		}
+		return mapReply(req[1], 25565, 0)
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
+	if _, err := n.Map(25565, "tcp"); err == nil {
+		t.Error("port 0 was accepted as a granted mapping")
+	}
+
+	res, err := n.Resolve([]model.PortRequestData{
+		{Key: "mc", InternalPort: 25565, Protocol: "tcp"}})
+	if err == nil && !res.Partial["mc"] {
+		t.Errorf("a zero grant must be partial, got %+v", res)
+	}
+}
+
+func TestAFractionalTimeoutIsNotTruncatedToZero(t *testing.T) {
+	addr := fakeGateway(t, func(req []byte) []byte {
+		time.Sleep(120 * time.Millisecond)
+		return publicAddrReply([4]byte{9, 9, 9, 9})
+	})
+	host, port := addrPort(t, addr)
+	natpmpPortOverride(t, port)
+	n := &NatPmpSource{Gateway: host, Timeout: 0.5, Retries: 1}
+	got, err := n.PublicAddress()
+	if err != nil {
+		t.Fatalf("a 0.5s timeout must wait half a second, not zero: %v", err)
+	}
+	if got != "9.9.9.9" {
+		t.Errorf("got %q", got)
+	}
 }

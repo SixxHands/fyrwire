@@ -74,7 +74,7 @@ func (c *CloudflareProvider) call(method, path string, body any) (json.RawMessag
 				"cloudflare refused the token: %s. This is a permissions "+
 					"problem, not a transient one.", cfErrText(env.Errors))
 		}
-		if code == 409 || code >= 500 {
+		if code == 409 || code == 500 || code == 502 || code == 503 || code == 504 {
 			return nil, &RateLimited{Msg: model.Errorf(
 				"cloudflare temporary failure (HTTP %d): %s", code,
 				cfErrText(env.Errors)).Error()}
@@ -114,7 +114,9 @@ func (c *CloudflareProvider) find(rtype, name string) (*cfRecord, error) {
 	}
 	var recs []cfRecord
 	if err := json.Unmarshal(raw, &recs); err != nil {
-		return nil, nil
+
+		return nil, model.Errorf(
+			"cloudflare sent an unreadable record list: %v", err)
 	}
 	if len(recs) == 0 {
 		return nil, nil

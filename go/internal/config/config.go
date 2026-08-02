@@ -15,22 +15,22 @@ import (
 const SchemaVersion = 1
 
 type Meta struct {
-	Version int `toml:"version"`
+	Version *int `toml:"version"`
 }
 
 type UDP struct {
-	IdleNew         int     `toml:"idle_new"`
-	IdleEstablished int     `toml:"idle_established"`
-	MaxSessions     int     `toml:"max_sessions"`
-	MaxPerIP        int     `toml:"max_per_ip"`
-	NewPerSec       float64 `toml:"new_per_sec"`
-	ReapInterval    float64 `toml:"reap_interval"`
-	DropZeroLength  *bool   `toml:"drop_zero_length"`
+	IdleNew         *int     `toml:"idle_new"`
+	IdleEstablished *int     `toml:"idle_established"`
+	MaxSessions     *int     `toml:"max_sessions"`
+	MaxPerIP        *int     `toml:"max_per_ip"`
+	NewPerSec       *float64 `toml:"new_per_sec"`
+	ReapInterval    *float64 `toml:"reap_interval"`
+	DropZeroLength  *bool    `toml:"drop_zero_length"`
 }
 
 type Node struct {
 	AName      string `toml:"a_name"`
-	TTL        int    `toml:"ttl"`
+	TTL        *int   `toml:"ttl"`
 	Relay      bool   `toml:"relay"`
 	RelayUDP   bool   `toml:"relay_udp"`
 	BindHost   string `toml:"bind_host"`
@@ -40,13 +40,13 @@ type Node struct {
 
 type Service struct {
 	Name         string `toml:"name"`
-	InternalPort int    `toml:"internal_port"`
+	InternalPort *int   `toml:"internal_port"`
 	SrvName      string `toml:"srv_name"`
 	Protocol     string `toml:"protocol"`
 	Preset       string `toml:"preset"`
 	Priority     int    `toml:"priority"`
-	Weight       int    `toml:"weight"`
-	TTL          int    `toml:"ttl"`
+	Weight       *int   `toml:"weight"`
+	TTL          *int   `toml:"ttl"`
 	Record       string `toml:"record"`
 }
 
@@ -208,11 +208,10 @@ func checkStructure(raw map[string]any) error {
 			}
 			continue
 		case "service":
-			list, ok := value.([]map[string]any)
-			if !ok {
-				return model.Errorf(
-					"services must be written as [[service]] (double brackets), " +
-						"one table per service")
+
+			list, err := asTableList(value)
+			if err != nil {
+				return err
 			}
 			for i, svc := range list {
 				if err := checkTable(fmtIndex(key, i), svc, spec.sub); err != nil {
@@ -235,14 +234,36 @@ func checkStructure(raw map[string]any) error {
 	return nil
 }
 
+func asTableList(v any) ([]map[string]any, error) {
+	switch t := v.(type) {
+	case []map[string]any:
+		return t, nil
+	case []any:
+		out := make([]map[string]any, 0, len(t))
+		for _, item := range t {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return nil, model.Errorf(
+					"services must be written as [[service]] (double brackets), " +
+						"one table per service")
+			}
+			out = append(out, m)
+		}
+		return out, nil
+	}
+	return nil, model.Errorf(
+		"services must be written as [[service]] (double brackets), " +
+			"one table per service")
+}
+
 func fmtIndex(name string, i int) string {
 	return name + "[" + strconv.Itoa(i) + "]"
 }
 
 func checkVersion(m Meta) error {
-	v := m.Version
-	if v == 0 {
-		v = SchemaVersion
+	v := SchemaVersion
+	if m.Version != nil {
+		v = *m.Version
 	}
 	if v > SchemaVersion {
 		return model.Errorf(
@@ -362,8 +383,15 @@ func checkServices(svcs []Service) error {
 			return model.Errorf("duplicate service name %q", s.Name)
 		}
 		seen[s.Name] = true
-		if s.InternalPort == 0 {
-			return model.Errorf("service[%d] is missing the required key \"internal_port\"", i)
+		if s.InternalPort == nil {
+			return model.Errorf(
+				"service[%d] is missing the required key \"internal_port\"", i)
+		}
+		if *s.InternalPort < 1 || *s.InternalPort > 65535 {
+
+			return model.Errorf(
+				"service[%d].internal_port is %d — a port is 1..65535",
+				i, *s.InternalPort)
 		}
 		if s.SrvName == "" {
 			return model.Errorf("service[%d] is missing the required key \"srv_name\"", i)
@@ -391,9 +419,9 @@ func checkCross(cfg *Config) error {
 }
 
 func (cfg *Config) Plan() (model.NodePlanData, error) {
-	ttl := cfg.Node.TTL
-	if ttl == 0 {
-		ttl = 60
+	ttl := 60
+	if cfg.Node.TTL != nil {
+		ttl = *cfg.Node.TTL
 	}
 	out := make([]model.Service, 0, len(cfg.Service))
 	for _, s := range cfg.Service {
@@ -402,21 +430,37 @@ func (cfg *Config) Plan() (model.NodePlanData, error) {
 			proto = "tcp"
 		}
 		record := s.Record
+		if s.Preset != "" {
+			p, ok := PresetLookup(s.Preset)
+			if !ok {
+				return model.NodePlanData{}, model.Errorf("unknown preset %q", s.Preset)
+			}
+
+			if record == "" {
+				record = p
+			}
+		}
 		if record == "" {
 			record = model.RecordSRV
 		}
-		weight := s.Weight
-		if weight == 0 {
-			weight = 5
+		weight := 5
+		if s.Weight != nil {
+			weight = *s.Weight
+		}
+		svcTTL := 0
+		if s.TTL != nil {
+			svcTTL = *s.TTL
 		}
 		out = append(out, model.Service{
-			Key: s.Name, InternalPort: s.InternalPort, SrvName: s.SrvName,
+			Key: s.Name, InternalPort: *s.InternalPort, SrvName: s.SrvName,
 			Protocol: proto, Priority: s.Priority, Weight: weight,
-			TTL: s.TTL, Record: record,
+			TTL: svcTTL, Record: record,
 		})
 	}
 	return model.NodePlanData{AName: cfg.Node.AName, Services: out, TTL: ttl}, nil
 }
+
+var PresetLookup = func(key string) (string, bool) { return "", true }
 
 func contains(hay []string, needle string) bool {
 	for _, h := range hay {

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -17,25 +18,51 @@ type UdpOptionsData struct {
 	ReapInterval    time.Duration
 	DropZeroLength  bool
 
+	MaxSessionsSet     bool
+	MaxPerIPSet        bool
+	NewPerSecSet       bool
+	IdleNewSet         bool
+	IdleEstablishedSet bool
+
 	Now func() time.Time
 }
 
+// Clamp the session cap to what the OS actually lets us open. Running out of file descriptors mid-game is not fun.
+func clampSessions(cap int) int {
+	if cap <= 0 {
+		return cap
+	}
+	if lo, hi, ok := localPortRange(); ok && hi-lo < cap {
+		cap = hi - lo
+	}
+	if n, ok := maxOpenFiles(); ok {
+		if room := n - 128; room > 16 && room < cap {
+			cap = room
+		}
+	}
+	if cap < 1 {
+		return 1
+	}
+	return cap
+}
+
 func (o UdpOptionsData) withDefaults() UdpOptionsData {
-	if o.IdleNew == 0 {
+	if o.IdleNew == 0 && !o.IdleNewSet {
 
 		o.IdleNew = 30 * time.Second
 	}
-	if o.IdleEstablished == 0 {
+	if o.IdleEstablished == 0 && !o.IdleEstablishedSet {
 
 		o.IdleEstablished = 180 * time.Second
 	}
-	if o.MaxSessions == 0 {
+	if o.MaxSessions == 0 && !o.MaxSessionsSet {
 		o.MaxSessions = 512
 	}
-	if o.MaxPerIP == 0 {
+	o.MaxSessions = clampSessions(o.MaxSessions)
+	if o.MaxPerIP == 0 && !o.MaxPerIPSet {
 		o.MaxPerIP = 8
 	}
-	if o.NewPerSec == 0 {
+	if o.NewPerSec == 0 && !o.NewPerSecSet {
 		o.NewPerSec = 32
 	}
 	if o.ReapInterval == 0 {
@@ -70,6 +97,7 @@ type udpListener struct {
 	wg      sync.WaitGroup
 
 	mu       sync.Mutex
+	closing  bool
 	sessions map[string]*udpSession
 	perIP    map[string]int
 	tokens   float64
@@ -126,8 +154,12 @@ func (u *udpListener) readClients() {
 				return
 			default:
 			}
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+
 			u.listenerErrors.Add(1)
-			return
+			continue
 		}
 		u.onClient(buf[:n], addr)
 	}
@@ -141,6 +173,12 @@ func (u *udpListener) onClient(data []byte, addr *net.UDPAddr) {
 	key := addr.String()
 
 	u.mu.Lock()
+	if u.closing {
+
+		u.mu.Unlock()
+		u.dropped.Add(1)
+		return
+	}
 	s, ok := u.sessions[key]
 	if !ok {
 		if len(u.sessions) >= u.opt.MaxSessions ||
@@ -163,6 +201,8 @@ func (u *udpListener) onClient(data []byte, addr *net.UDPAddr) {
 	u.mu.Unlock()
 
 	u.c2sBytes.Add(int64(len(data)))
+
+	_ = conn.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
 	if _, err := conn.Write(data); err != nil {
 		u.sendDropped.Add(1)
 	}
@@ -217,7 +257,10 @@ func (u *udpListener) readBackend(s *udpSession) {
 		u.s2cBytes.Add(int64(n))
 
 		if _, err := u.conn.WriteToUDP(buf[:n], s.client); err != nil {
-			return
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			u.sendDropped.Add(1)
 		}
 	}
 }
@@ -298,6 +341,7 @@ func (u *udpListener) Stop() {
 		u.conn.Close()
 	}
 	u.mu.Lock()
+	u.closing = true
 	sessions := make([]*udpSession, 0, len(u.sessions))
 	for _, s := range u.sessions {
 		sessions = append(sessions, s)

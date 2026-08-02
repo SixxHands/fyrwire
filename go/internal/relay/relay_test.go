@@ -2,6 +2,7 @@ package relay
 
 import (
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -168,7 +169,37 @@ func TestReplySourcePortIsTheGrantedPort(t *testing.T) {
 	}
 }
 
-func TestBackToBackDatagramsOpenOneSession(t *testing.T) {
+func TestConcurrentDatagramsFromOneClientOpenOneSession(t *testing.T) {
+	be, _ := udpEcho(t, "r")
+	front := freePort(t)
+	l := newUDPListener("a", BindingData{"127.0.0.1", front, "127.0.0.1", be, "udp"},
+		func(string) {}, UdpOptionsData{})
+	if err := l.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer l.Stop()
+
+	addr, _ := net.ResolveUDPAddr("udp4", "1.2.3.4:5000")
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			l.onClient([]byte("x"), addr)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if n := l.total.Load(); n != 1 {
+		t.Errorf("one client opened %d sessions — the miss check and the "+
+			"insert are not atomic", n)
+	}
+}
+
+func TestBackToBackDatagramsRoundTrip(t *testing.T) {
 	be, seen := udpEcho(t, "r")
 	m := NewManager(nil, UdpOptionsData{})
 	defer m.Shutdown()
@@ -217,16 +248,48 @@ func TestPortCanBeReboundImmediatelyAfterStop(t *testing.T) {
 	be, _ := udpEcho(t, "z")
 	front := freePort(t)
 	spec := BindingData{"127.0.0.1", front, "127.0.0.1", be, "udp"}
-	first := newUDPListener("a", spec, nil, UdpOptionsData{})
+	first := newUDPListener("a", spec, func(string) {}, UdpOptionsData{})
 	if err := first.Start(); err != nil {
 		t.Fatal(err)
 	}
 	first.Stop()
-	second := newUDPListener("a", spec, nil, UdpOptionsData{})
+	second := newUDPListener("a", spec, func(string) {}, UdpOptionsData{})
 	if err := second.Start(); err != nil {
-		t.Fatalf("rebind failed — Stop() returned before the port was free: %v", err)
+		t.Fatalf("rebind failed — the port was not free: %v", err)
 	}
 	second.Stop()
+}
+
+func TestStopWaitsForItsGoroutines(t *testing.T) {
+
+	dead, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dead.Close()
+	bePort := dead.LocalAddr().(*net.UDPAddr).Port
+
+	front := freePort(t)
+	l := newUDPListener("a", BindingData{"127.0.0.1", front, "127.0.0.1", bePort, "udp"},
+		func(string) {}, UdpOptionsData{})
+	if err := l.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 24; i++ {
+		addr, _ := net.ResolveUDPAddr("udp4",
+			net.JoinHostPort("1.2.3.4", itoa(6000+i)))
+		l.onClient([]byte("x"), addr)
+	}
+	base := runtime.NumGoroutine()
+	if base < 24 {
+		t.Skipf("expected the session goroutines to be running, saw %d", base)
+	}
+	l.Stop()
+
+	if after := runtime.NumGoroutine(); after > base-20 {
+		t.Errorf("Stop() returned with ~%d goroutines still running (was %d) — "+
+			"it is not waiting for them", after, base)
+	}
 }
 
 func TestRotatingOnePortLeavesTheOtherAlone(t *testing.T) {

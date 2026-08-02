@@ -14,6 +14,7 @@ import (
 	"github.com/sixxhands/fyrwire/internal/hostinfo"
 	"github.com/sixxhands/fyrwire/internal/install"
 	"github.com/sixxhands/fyrwire/internal/model"
+	"github.com/sixxhands/fyrwire/internal/notify"
 	"github.com/sixxhands/fyrwire/internal/paths"
 	"github.com/sixxhands/fyrwire/internal/preset"
 	"github.com/sixxhands/fyrwire/internal/provider"
@@ -146,26 +147,43 @@ func build(cfgPath, statePath string) (*agent.Agent, *config.Config, error) {
 		Relay: cfg.Node.Relay, RelayUDP: cfg.Node.RelayUDP,
 		BindHost: cfg.Node.BindHost, TargetHost: cfg.Node.TargetHost,
 		Log: logln, UDP: udpOptions(cfg.Node.UDP),
+		Notifier: notifierFrom(cfg), NodeName: cfg.Node.AName,
 	}
 	return agent.New(src, prov, plan, statePath, opt), cfg, nil
 }
 
-func udpOptions(u config.UDP) relay.UdpOptionsData {
-	o := relay.UdpOptionsData{
-		MaxSessions: u.MaxSessions, MaxPerIP: u.MaxPerIP,
-		NewPerSec: u.NewPerSec, DropZeroLength: true,
+func notifierFrom(cfg *config.Config) *notify.Notifier {
+	if cfg.Alerts.Webhook == "" && cfg.Alerts.Command == "" {
+		return nil
 	}
+	return &notify.Notifier{Webhook: cfg.Alerts.Webhook,
+		Command: cfg.Alerts.Command, AfterFailures: cfg.Alerts.AfterFailures,
+		Log: logln}
+}
+
+func udpOptions(u config.UDP) relay.UdpOptionsData {
+	o := relay.UdpOptionsData{DropZeroLength: true}
 	if u.DropZeroLength != nil {
 		o.DropZeroLength = *u.DropZeroLength
 	}
-	if u.IdleNew > 0 {
-		o.IdleNew = time.Duration(u.IdleNew) * time.Second
+	if u.MaxSessions != nil {
+		o.MaxSessions, o.MaxSessionsSet = *u.MaxSessions, true
 	}
-	if u.IdleEstablished > 0 {
-		o.IdleEstablished = time.Duration(u.IdleEstablished) * time.Second
+	if u.MaxPerIP != nil {
+		o.MaxPerIP, o.MaxPerIPSet = *u.MaxPerIP, true
 	}
-	if u.ReapInterval > 0 {
-		o.ReapInterval = time.Duration(u.ReapInterval*float64(time.Second)) * 1
+	if u.NewPerSec != nil {
+		o.NewPerSec, o.NewPerSecSet = *u.NewPerSec, true
+	}
+	if u.IdleNew != nil {
+		o.IdleNew, o.IdleNewSet = time.Duration(*u.IdleNew)*time.Second, true
+	}
+	if u.IdleEstablished != nil {
+		o.IdleEstablished = time.Duration(*u.IdleEstablished) * time.Second
+		o.IdleEstablishedSet = true
+	}
+	if u.ReapInterval != nil {
+		o.ReapInterval = time.Duration(*u.ReapInterval * float64(time.Second))
 	}
 	return o
 }

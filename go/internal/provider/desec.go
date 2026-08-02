@@ -2,8 +2,8 @@ package provider
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -26,6 +26,21 @@ type DesecProvider struct {
 
 const desecAPI = "https://desec.io/api/v1"
 
+func escapeSegment(s string) string {
+	const safe = "abcdefghijklmnopqrstuvwxyz" +
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~@*"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if strings.IndexByte(safe, c) >= 0 {
+			b.WriteByte(c)
+		} else {
+			b.WriteString(fmt.Sprintf("%%%02X", c))
+		}
+	}
+	return b.String()
+}
+
 func (d *DesecProvider) Name() string { return "desec" }
 
 func (d *DesecProvider) api() string {
@@ -38,9 +53,7 @@ func (d *DesecProvider) api() string {
 func (d *DesecProvider) url(parts ...string) string {
 	clean := make([]string, 0, len(parts))
 	for _, p := range parts {
-		e := url.PathEscape(strings.TrimSpace(p))
-		e = strings.ReplaceAll(e, "%40", "@")
-		e = strings.ReplaceAll(e, "%2A", "*")
+		e := escapeSegment(strings.TrimSpace(p))
 		clean = append(clean, e)
 	}
 	return d.api() + "/" + strings.Join(clean, "/") + "/"
@@ -71,7 +84,7 @@ func (d *DesecProvider) call(method, u string, body any) ([]byte, error) {
 			"desec refused the token (HTTP %d): %s. This is a permissions "+
 				"problem, not a transient one — retrying will not help.",
 			code, jsonOr(data, "forbidden"))
-	case code == 409 || code >= 500:
+	case code == 409 || code == 500 || code == 502 || code == 503 || code == 504:
 
 		return nil, &RateLimited{
 			Msg: model.Errorf("desec temporary failure (HTTP %d): %s",
@@ -132,7 +145,7 @@ func (d *DesecProvider) checkTTL(ttl int) error {
 }
 
 func (d *DesecProvider) subname(name string) (string, error) {
-	n := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	n := strings.ToLower(strings.Trim(strings.TrimSpace(name), "."))
 	if n == d.Domain {
 		return "", nil
 	}
@@ -164,6 +177,9 @@ func (d *DesecProvider) read(rtype, name string) (*rrset, error) {
 	data, err := d.call("GET", d.url("domains", d.Domain, "rrsets", seg, rtype), nil)
 	if err != nil || data == nil {
 		return nil, err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, nil
 	}
 	var out rrset
 	if err := json.Unmarshal(data, &out); err != nil {

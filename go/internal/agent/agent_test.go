@@ -226,6 +226,66 @@ func TestTheLoopSurvivesARateLimit(t *testing.T) {
 	}
 }
 
+func TestARateLimitBacksOffAndAGenericErrorDoesNot(t *testing.T) {
+	measure := func(err error) time.Duration {
+		src := &fakeSource{res: res("1.2.3.4", map[string]int{"mc": 51471})}
+		a := newTestAgent(t, src, &fakeProvider{err: err})
+		start := time.Now()
+		a.Run(80*time.Millisecond, 0, 3)
+		return time.Since(start)
+	}
+	generic := measure(model.Errorf("bad token"))
+	limited := measure(&provider.RateLimited{Msg: "slow down"})
+	if limited <= generic {
+		t.Errorf("a rate limit must back off: rate-limited=%v, generic=%v",
+			limited, generic)
+	}
+}
+
+func TestRetryAfterIsHonouredWhenItIsLongerThanTheBackoff(t *testing.T) {
+	src := &fakeSource{res: res("1.2.3.4", map[string]int{"mc": 51471})}
+	a := newTestAgent(t, src, &fakeProvider{
+		err: &provider.RateLimited{Msg: "slow", RetryAfter: 400 * time.Millisecond}})
+	start := time.Now()
+	a.Run(10*time.Millisecond, 0, 2)
+	if elapsed := time.Since(start); elapsed < 400*time.Millisecond {
+		t.Errorf("waited %v, but the provider asked for 400ms", elapsed)
+	}
+}
+
+func TestWritesWithinOneCycleAreSpaced(t *testing.T) {
+	p := plan()
+	for _, k := range []string{"a", "b", "c"} {
+		p.Services = append(p.Services, model.Service{Key: k, InternalPort: 1,
+			SrvName: "_" + k + "._tcp.example.com", Protocol: "tcp",
+			Weight: 5, Record: model.RecordSRV})
+	}
+	ports := map[string]int{"mc": 1, "a": 2, "b": 3, "c": 4}
+	src := &fakeSource{res: res("1.2.3.4", ports)}
+	a := New(src, &fakeProvider{}, p, filepath.Join(t.TempDir(), "s.json"),
+		OptionsData{})
+	start := time.Now()
+	a.Tick(false)
+
+	if elapsed := time.Since(start); elapsed < 4*writeSpacing {
+		t.Errorf("five writes took %v — they are not being spaced, so a "+
+			"reconnect will trip the provider's rate limit", elapsed)
+	}
+}
+
+func TestTheFirstWriteOfACycleIsNotDelayed(t *testing.T) {
+	src := &fakeSource{res: res("1.2.3.4", map[string]int{"mc": 51471})}
+	a := newTestAgent(t, src, &fakeProvider{})
+	a.Tick(false)
+	src.res = res("5.6.7.8", map[string]int{"mc": 51471})
+	start := time.Now()
+	a.Tick(false)
+	if elapsed := time.Since(start); elapsed > writeSpacing {
+		t.Errorf("a single-write cycle took %v — pacing is leaking across "+
+			"ticks", elapsed)
+	}
+}
+
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -51,6 +52,7 @@ func (m *Manager) Sync(wanted map[string]BindingData) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var changes []string
+	wasBound := map[string]bool{}
 
 	for key, l := range m.listeners {
 		if _, keep := wanted[key]; !keep {
@@ -73,6 +75,7 @@ func (m *Manager) Sync(wanted map[string]BindingData) []string {
 
 			delete(m.listeners, key)
 			delete(m.specs, key)
+			wasBound[key] = true
 		}
 		var l IRelayListener
 		if spec.Protocol == "udp" {
@@ -89,8 +92,12 @@ func (m *Manager) Sync(wanted map[string]BindingData) []string {
 		}
 		m.listeners[key] = l
 		m.specs[key] = spec
-		changes = append(changes, fmt.Sprintf("relay %s listening %s → %s (%s)",
-			key, spec.bindAddr(), spec.targetAddr(), spec.Protocol))
+		verb := "listening"
+		if wasBound[key] {
+			verb = "rebound"
+		}
+		changes = append(changes, fmt.Sprintf("relay %s %s %s → %s (%s)",
+			key, verb, spec.bindAddr(), spec.targetAddr(), spec.Protocol))
 	}
 	return changes
 }
@@ -128,6 +135,9 @@ type tcpListener struct {
 	total    int
 	refused  int
 	connTime time.Duration
+
+	conns   map[net.Conn]struct{}
+	closing bool
 }
 
 const (
@@ -139,7 +149,7 @@ const (
 func newTCPListener(key string, spec BindingData, log func(string)) *tcpListener {
 	return &tcpListener{key: key, spec: spec, log: log,
 		done: make(chan struct{}), sem: make(chan struct{}, tcpMaxConns),
-		connTime: tcpConnectTimeout}
+		connTime: tcpConnectTimeout, conns: map[net.Conn]struct{}{}}
 }
 
 func (t *tcpListener) Start() error {
@@ -163,7 +173,16 @@ func (t *tcpListener) accept() {
 				return
 			default:
 			}
-			return
+
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			t.log(fmt.Sprintf("relay %s: accept error, retrying — %v", t.key, err))
+			time.Sleep(100 * time.Millisecond)
+			continue
 		}
 		select {
 		case t.sem <- struct{}{}:
@@ -190,6 +209,7 @@ func (t *tcpListener) handle(client net.Conn) {
 		<-t.sem
 		t.mu.Lock()
 		t.active--
+		delete(t.conns, client)
 		t.mu.Unlock()
 		client.Close()
 	}()
@@ -200,6 +220,20 @@ func (t *tcpListener) handle(client net.Conn) {
 		return
 	}
 	defer backend.Close()
+	t.mu.Lock()
+	if t.closing {
+
+		t.mu.Unlock()
+		return
+	}
+	t.conns[client] = struct{}{}
+	t.conns[backend] = struct{}{}
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		delete(t.conns, backend)
+		t.mu.Unlock()
+	}()
 
 	setNoDelay(client)
 	setNoDelay(backend)
@@ -242,6 +276,14 @@ func (t *tcpListener) Stop() {
 	if t.ln != nil {
 		t.ln.Close()
 	}
+
+	t.mu.Lock()
+	t.closing = true
+	for c := range t.conns {
+		c.Close()
+	}
+	t.conns = map[net.Conn]struct{}{}
+	t.mu.Unlock()
 	t.wg.Wait()
 }
 

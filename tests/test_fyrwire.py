@@ -6,9 +6,11 @@ import socket
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 
 from fyrwire.agent import Agent, AgentState
+from fyrwire import config as config_mod
 from fyrwire import providers
 from fyrwire.models import (FyrWireError, NodePlanData, EndpointData, Service,
                             SrvRecordData)
@@ -966,3 +968,115 @@ class TestUdpSessionPolicy(unittest.TestCase):
         from fyrwire.relay import _UdpListener
         self.assertLessEqual(_UdpListener._clamp(10 ** 9), 10 ** 9)
         self.assertGreaterEqual(_UdpListener._clamp(10 ** 9), 1)
+
+
+BASE_CFG = '''
+[source]
+type = "natpmp"
+gateway = "10.2.0.1"
+[provider]
+type = "cloudflare"
+api_token = "env:T"
+zone_id = "z"
+[node]
+a_name = "node.example.com"
+ttl = 60
+{node}
+[[service]]
+name = "mc"
+internal_port = 25565
+srv_name = "_minecraft._tcp.example.com"
+{svc}
+'''
+
+
+def cfg_text(node="", svc="", top=""):
+    return top + "\n" + BASE_CFG.format(node=node, svc=svc)
+
+
+class TestConfigSchema(unittest.TestCase):
+    def load(self, text):
+        from fyrwire import config
+        return config.validate(tomllib.loads(text))
+
+    def rejects(self, text, *expect):
+        with self.assertRaises(FyrWireError) as cm:
+            self.load(text)
+        msg = str(cm.exception)
+        for e in expect:
+            self.assertIn(e, msg)
+        return msg
+
+    def test_a_valid_config_loads(self):
+        self.assertIn("node", self.load(cfg_text()))
+
+    def test_typo_in_a_node_key_is_refused_with_a_suggestion(self):
+        self.rejects(cfg_text(node="relayy = true"), "relayy", "did you mean")
+
+    def test_typo_in_a_service_key_is_refused(self):
+        self.rejects(cfg_text(svc="internl_port = 1"), "internal_port")
+
+    def test_typo_in_a_section_name_is_refused(self):
+        self.rejects(cfg_text() + '\n[alerst]\nwebhook = "x"\n', "alerst", "alerts")
+
+    def test_typo_in_a_provider_key_is_refused(self):
+        self.rejects(cfg_text().replace('zone_id = "z"', 'zoneid = "z"'), "zoneid")
+
+    def test_typo_in_a_udp_key_is_refused(self):
+        self.rejects(cfg_text(node="relay = true\nrelay_udp = true\n"
+                                   "[node.udp]\nidle_neww = 5"), "idle_new")
+
+    def test_unknown_provider_type_is_refused_with_a_suggestion(self):
+        self.rejects(cfg_text().replace('"cloudflare"', '"clouflare"'),
+                     "did you mean", "cloudflare")
+
+    def test_missing_required_source_key_names_it(self):
+        self.rejects(cfg_text().replace('gateway = "10.2.0.1"', ""), "gateway")
+
+    def test_missing_required_service_key_names_it(self):
+        self.rejects(cfg_text().replace(
+            'srv_name = "_minecraft._tcp.example.com"', ""), "srv_name")
+
+    def test_bool_and_int_are_not_interchangeable(self):
+        self.rejects(cfg_text(node="relay = 1"), "true or false")
+        self.rejects(cfg_text() + "\n[agent]\ninterval = true\n", "boolean")
+
+    def test_enum_values_are_checked(self):
+        self.rejects(cfg_text(svc='protocol = "sctp"'), "tcp, udp")
+        self.rejects(cfg_text(svc='record = "txt"'), "srv")
+        self.load(cfg_text(svc='protocol = "udp"'))
+
+    def test_relay_udp_without_relay_is_refused(self):
+        self.rejects(cfg_text(node="relay_udp = true"), "relay_udp", "relay")
+
+    def test_single_bracket_service_is_diagnosed(self):
+        self.rejects(cfg_text().replace("[[service]]", "[service]"),
+                     "double brackets")
+
+    def test_a_newer_schema_version_is_refused_not_guessed(self):
+        self.rejects(cfg_text(top="[fyrwire]\nversion = 99"), "version 99", "1")
+
+    def test_the_current_schema_version_is_accepted(self):
+        self.load(cfg_text(top=f"[fyrwire]\nversion = {config_mod.SCHEMA_VERSION}"))
+
+    def test_a_config_with_no_version_is_treated_as_version_one(self):
+        self.assertNotIn("fyrwire", self.load(cfg_text()))
+
+    def test_env_secrets_are_not_type_checked_as_their_final_value(self):
+        self.load(cfg_text().replace('zone_id = "z"', 'zone_id = "env:ZONE"'))
+
+    def test_the_desec_provider_validates_too(self):
+        self.load(cfg_text().replace(
+            'type = "cloudflare"\napi_token = "env:T"\nzone_id = "z"',
+            'type = "desec"\ntoken = "env:T"\ndomain = "example.com"'))
+
+    def test_schema_is_derived_from_constructors_so_it_cannot_drift(self):
+        from fyrwire import config, providers
+        keys = config._class_keys(providers.DesecProvider)
+        self.assertEqual(set(keys), {"token", "domain", "timeout"})
+        self.assertTrue(keys["token"][1], "token has no default, so it is required")
+        self.assertFalse(keys["timeout"][1], "timeout has a default")
+
+    def test_starter_config_passes_its_own_validator(self):
+        from fyrwire import cli
+        self.load(cli.STARTER)

@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from . import banner, notify, providers, sources, tui, setup
+from . import banner, config, notify, providers, sources, tui, setup
 from .agent import Agent
 from .models import FyrWireError, NodePlanData, Service
 
@@ -29,12 +29,11 @@ def load_config(path: str, resolve_secrets: bool = True) -> dict:
     if not os.path.exists(path):
         raise FyrWireError(f"no config at {path} — run `fyrwire init` to write a starter")
     with open(path, "rb") as fh:
-        cfg = tomllib.load(fh)
-    for key in ("source", "provider", "node"):
-        if key not in cfg:
-            raise FyrWireError(f"config is missing the [{key}] section")
-    if not cfg.get("service"):
-        raise FyrWireError("config defines no [[service]] entries")
+        try:
+            cfg = tomllib.load(fh)
+        except tomllib.TOMLDecodeError as e:
+            raise FyrWireError(f"{path} is not valid TOML: {e}") from None
+    cfg = config.validate(cfg)
     if not resolve_secrets:
         return cfg
     prov = dict(cfg["provider"])
@@ -81,22 +80,6 @@ def build_plan(cfg: dict) -> NodePlanData:
                     ttl=int(node.get("ttl", 60)))
 
 
-_UDP_KEYS = {"idle_new": int, "idle_established": int, "max_sessions": int,
-             "max_per_ip": int, "new_per_sec": float, "reap_interval": float,
-             "drop_zero_length": bool}
-
-
-def _udp_options(raw: dict) -> dict:
-    out = {}
-    for k, v in raw.items():
-        if k not in _UDP_KEYS:
-            raise FyrWireError(
-                f"unknown option node.udp.{k}; valid: "
-                f"{', '.join(sorted(_UDP_KEYS))}")
-        out[k] = _UDP_KEYS[k](v)
-    return out
-
-
 def build_agent(cfg: dict, state_path: str, log=print) -> Agent:
     s = dict(cfg["source"])
     p = dict(cfg["provider"])
@@ -107,7 +90,7 @@ def build_agent(cfg: dict, state_path: str, log=print) -> Agent:
                  notifier=notify.from_config(cfg, log=log),
                  relay=bool(node.get("relay", False)),
                  relay_udp=bool(node.get("relay_udp", False)),
-                 udp_options=_udp_options(node.get("udp") or {}),
+                 udp_options=dict(node.get("udp") or {}),
                  bind_host=node.get("bind_host"),
                  target_host=node.get("target_host", "127.0.0.1"))
 

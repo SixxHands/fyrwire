@@ -252,14 +252,22 @@ def cmd_presets(args) -> int:
     from . import presets
     from .tui import BAD, DIM, LABEL, OK, RESET, TEXT, WARN
 
-    colour = {"srv": OK, "https": WARN, "manual": BAD}
-    print(f"  {DIM}{'preset':<18}{'port':>6}  {'proto':<6}{'record':<7}"
-          f"client follows the port?{RESET}")
+    colour = {"srv": OK, "srv-setup": WARN, "https": WARN, "manual": BAD}
+    groups = getattr(presets, "GROUPS", {})
+    by_group: dict[str, list] = {}
     for p in presets.listing():
-        port = str(p.port) if p.port else "—"
-        print(f"  {LABEL}{p.key:<18}{RESET}{TEXT}{port:>6}{RESET}  "
-              f"{DIM}{p.protocol:<6}{p.record:<7}{RESET}"
-              f"{colour[p.follows]}{p.follows}{RESET}")
+        by_group.setdefault(getattr(p, "group", "generic"), []).append(p)
+
+    for gkey, gdesc in (groups.items() if groups else [("", "")]):
+        rows = by_group.get(gkey, [])
+        if not rows:
+            continue
+        print(f"\n  {TEXT}{gdesc}{RESET}")
+        for p in rows:
+            port = str(p.port) if p.port else "—"
+            print(f"    {LABEL}{p.key:<18}{RESET}{TEXT}{port:>6}{RESET}  "
+                  f"{DIM}{p.protocol:<5}{p.record:<6}{RESET}"
+                  f"{colour.get(p.follows, DIM)}{p.follows}{RESET}")
     print()
     for k, v in presets.FOLLOWS_HELP.items():
         print(f"  {colour[k]}{k:<8}{RESET}{DIM}{v}{RESET}")

@@ -462,6 +462,34 @@ class TestHostInfo(unittest.TestCase):
             h._run = real
 
 
+class TestPresets(unittest.TestCase):
+
+    def test_srv_record_implies_a_client_that_reads_it(self):
+        from fyrwire import presets
+        bad = [p.key for p in presets.listing()
+               if p.record == "srv" and p.follows not in ("srv", "srv-setup")]
+        self.assertEqual(bad, [], "publishing SRV that nothing reads is a lie")
+
+    def test_srv_name_refuses_presets_with_no_srv_record(self):
+        from fyrwire import presets
+        web = presets.get("web")
+        with self.assertRaises(ValueError):
+            web.srv_name("example.com")
+
+    def test_srv_names_are_well_formed(self):
+        from fyrwire import presets
+        for p in presets.listing():
+            if p.record != "srv":
+                continue
+            name = p.srv_name("example.com")
+            self.assertRegex(name, r"^_[a-z0-9-]+\._(tcp|udp)\.example\.com$",
+                             f"{p.key} produced {name}")
+
+    def test_web_is_not_advertised_as_automatic(self):
+        from fyrwire import presets
+        self.assertEqual(presets.get("web").follows, "manual")
+
+
 class TestPanels(unittest.TestCase):
     def test_geometry_is_exact(self):
         for width in (60, 80, 100, 132):

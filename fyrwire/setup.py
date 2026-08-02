@@ -121,7 +121,8 @@ def run(config_path: str, force: bool = False) -> int:
     _say(f"{TEXT}What are you publishing?{RESET}")
     plist = _presets.listing()
     for i, pre in enumerate(plist, 1):
-        colour = {"srv": OK, "https": WARN, "manual": DIM}[pre.follows]
+        colour = {"srv": OK, "srv-setup": WARN, "https": WARN,
+                  "manual": DIM}.get(pre.follows, DIM)
         port = str(pre.port) if pre.port else "?"
         _say(f"  {DIM}{i:>2}){RESET} {pre.label:<26}{DIM}{port:>6} {pre.protocol}"
              f"{RESET}  {colour}{pre.follows}{RESET}")
@@ -151,7 +152,7 @@ def run(config_path: str, force: bool = False) -> int:
         if any(x["name"] == key for x in services):
             _bad(f"already have a service called {key!r}")
             continue
-        srv = pre.srv_name(zone_name) if pre.record != "https" else \
+        srv = pre.srv_name(zone_name) if pre.record == "srv" else \
             _ask("  hostname", f"{key}.{zone_name}")
         services.append({"name": key, "internal_port": int(port),
                          "protocol": pre.protocol, "srv_name": srv,
@@ -160,8 +161,9 @@ def run(config_path: str, force: bool = False) -> int:
         if pre.follows == "manual":
             _warn(f"  {pre.label} clients do not follow DNS ports — you will "
                   f"hand out host:port")
-        elif pre.follows == "https":
-            _warn(f"  browsers may ignore the port; see the README")
+        elif pre.follows == "srv-setup":
+            _warn(f"  {pre.label} reads the SRV record ONCE when the account is "
+                  f"added, then caches it — a rotation breaks saved accounts")
         if pre.note:
             _say(f"    {DIM}{pre.note}{RESET}")
         if not _yes("Add another?", False):
@@ -248,7 +250,8 @@ def add_service(config_path: str) -> int:
     plist = _presets.listing()
     _say(f"{TEXT}What kind of service?{RESET}")
     for i, pre_ in enumerate(plist, 1):
-        colour = {"srv": OK, "https": WARN, "manual": DIM}[pre_.follows]
+        colour = {"srv": OK, "srv-setup": WARN, "https": WARN,
+                  "manual": DIM}.get(pre_.follows, DIM)
         port_s = str(pre_.port) if pre_.port else "?"
         _say(f"  {DIM}{i:>2}){RESET} {pre_.label:<26}{DIM}{port_s:>6}{RESET}  "
              f"{colour}{pre_.follows}{RESET}")
@@ -276,12 +279,13 @@ def add_service(config_path: str) -> int:
         return 1
     proto = pre.protocol
     record = pre.record
-    srv = pre.srv_name(zone) if record != "https" else _ask("Hostname", f"{key}.{zone}")
+    srv = pre.srv_name(zone) if record == "srv" else _ask("Hostname", f"{key}.{zone}")
 
     if pre.follows == "manual":
         _warn(f"{pre.label} clients do not follow DNS ports — hand out host:port")
-    elif pre.follows == "https":
-        _warn("browsers may ignore the port; see the README")
+    elif pre.follows == "srv-setup":
+        _warn(f"{pre.label} reads the SRV record only at account setup, then "
+              f"caches it — a rotation breaks saved accounts")
     if pre.note:
         _say(f"  {DIM}{pre.note}{RESET}")
 

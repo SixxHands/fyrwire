@@ -84,3 +84,20 @@ func execStart(t *testing.T, unit string) string {
 	t.Fatal("no ExecStart in the unit")
 	return ""
 }
+
+func TestInstallingFromABuildDirectoryIsCalledOut(t *testing.T) {
+	for _, p := range []string{
+		"/home/u/proj/go/dist/fyrwire",
+		"/src/build/fyrwire",
+		"/x/target/release/fyrwire",
+	} {
+		if buildDirWarning(p) == "" {
+			t.Errorf("%s is a build output path and should be flagged", p)
+		}
+	}
+	for _, p := range []string{"/usr/local/bin/fyrwire", "/home/u/.local/bin/fyrwire"} {
+		if w := buildDirWarning(p); w != "" {
+			t.Errorf("%s is a stable path, got warning: %s", p, w)
+		}
+	}
+}

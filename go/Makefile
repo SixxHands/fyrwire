@@ -28,7 +28,7 @@ vet:
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(OUT)/fyrwire ./cmd/fyrwire
 
-release: clean
+release: build
 	@mkdir -p $(OUT)
 	@for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; \
@@ -39,6 +39,9 @@ release: clean
 			-o $(OUT)/fyrwire-$$os-$$arch$$ext ./cmd/fyrwire || exit 1; \
 	done
 	@cd $(OUT) && sha256sum fyrwire-* > SHA256SUMS
+	@echo
+	@echo "  note: $(OUT)/fyrwire is the local build and is deliberately kept."
+	@echo "  \`make clean\` removes it; if a service points there, reinstall after."
 	@echo
 	@ls -1sh $(OUT)
 

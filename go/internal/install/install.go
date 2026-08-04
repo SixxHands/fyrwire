@@ -26,6 +26,21 @@ func launcher(configPath string) []string {
 	return []string{exe, "--config", configPath, "run"}
 }
 
+// Warn if someone ran 'fyrwire install' straight out of dist/ or build/. The next rebuild will delete the service binary out from under it.
+func buildDirWarning(exe string) string {
+	for _, d := range []string{"/dist/", "/build/", "/target/", "/_output/"} {
+		if strings.Contains(exe, d) {
+			return "the binary being installed is at " + exe + ",\n" +
+				"  which is a build output directory — a later build may delete\n" +
+				"  it, and the service will then fail to start. Copy it somewhere\n" +
+				"  stable first:\n" +
+				"    install -Dm755 " + exe + " ~/.local/bin/fyrwire\n" +
+				"  and run `fyrwire install` from there."
+		}
+	}
+	return ""
+}
+
 func systemdArg(a string) string {
 	a = strings.ReplaceAll(a, "%", "%%")
 	if strings.ContainsAny(a, " \"\\\t") {
@@ -128,6 +143,10 @@ func SchtasksCommand(configPath string) []string {
 }
 
 func Install(configPath string, log func(string)) error {
+	if w := buildDirWarning(launcher(configPath)[0]); w != "" {
+		log("! " + w)
+		log("")
+	}
 	switch runtime.GOOS {
 	case "linux":
 		dir := paths.ServiceDir()

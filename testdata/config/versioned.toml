@@ -1,4 +1,5 @@
 #EXPECT accept
+#WHY an explicit current schema version
 
 [fyrwire]
 version = 1

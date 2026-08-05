@@ -40,8 +40,8 @@ release: build
 	done
 	@cd $(OUT) && sha256sum fyrwire-* > SHA256SUMS
 	@echo
-	@echo "  note: $(OUT)/fyrwire is the local build and is deliberately kept."
-	@echo "  \`make clean\` removes it; if a service points there, reinstall after."
+	@echo "  note: $(OUT)/fyrwire is kept so an installed service pointing there still starts."
+	@echo "  run 'make clean' to remove it."
 	@echo
 	@ls -1sh $(OUT)
 

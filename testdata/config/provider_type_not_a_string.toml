@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY type = 5 is plain TOML anyone can write
 #CONTAINS string
 
 [source]

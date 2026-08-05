@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY a config that publishes nothing
 #CONTAINS service
 
 [source]

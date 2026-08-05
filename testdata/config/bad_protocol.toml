@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY an unknown protocol would silently skip the service
 #CONTAINS tcp
 #CONTAINS udp
 

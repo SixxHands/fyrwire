@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY an unknown record kind
 #CONTAINS srv
 
 

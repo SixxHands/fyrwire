@@ -1,4 +1,5 @@
 #EXPECT accept
+#WHY 0 is a valid DNS TTL meaning do not cache
 
 [source]
 type = "natpmp"

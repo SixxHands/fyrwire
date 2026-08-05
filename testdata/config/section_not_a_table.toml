@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY ordinary TOML that used to produce a traceback
 #CONTAINS table
 
 node = 5

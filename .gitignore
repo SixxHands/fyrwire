@@ -1,8 +1,8 @@
-__pycache__/
-*.pyc
-.venv/
 dist/
 build/
-*.egg-info/
+/fyrwire
+/fyrwire.exe
+*.test
+*.out
 fyrwire.toml
 state.json

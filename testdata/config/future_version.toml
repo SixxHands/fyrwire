@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY a config newer than this binary understands
 #CONTAINS version
 
 [fyrwire]

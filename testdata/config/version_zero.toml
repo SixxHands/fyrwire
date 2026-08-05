@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY an explicit zero must not read as an absent key
 #CONTAINS version
 
 [fyrwire]

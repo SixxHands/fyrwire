@@ -1,4 +1,5 @@
 #EXPECT accept
+#WHY inline arrays of tables are legal TOML and mean exactly the same thing
 
 service = [
   { name = "minecraft", internal_port = 25565, srv_name = "_minecraft._tcp.play.example.com" },

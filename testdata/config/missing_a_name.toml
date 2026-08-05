@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY nothing to point the SRVs at
 #CONTAINS a_name
 
 [source]

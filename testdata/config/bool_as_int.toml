@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY bool is a subclass of int when parsing config
 #CONTAINS true or false
 
 

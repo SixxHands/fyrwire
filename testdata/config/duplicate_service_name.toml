@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY two services sharing a key would collide in state
 #CONTAINS duplicate
 
 [source]

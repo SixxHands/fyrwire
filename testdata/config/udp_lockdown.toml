@@ -1,4 +1,5 @@
 #EXPECT accept
+#WHY max_per_ip = 0 means allow nothing, not fall back to the default
 
 [source]
 type = "natpmp"

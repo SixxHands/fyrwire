@@ -1,4 +1,5 @@
 #EXPECT reject
+#WHY uint16 would silently wrap 70000 to 4464
 #CONTAINS 1..65535
 
 [source]

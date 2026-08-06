@@ -48,30 +48,30 @@ func (r EndpointData) Key() string {
 }
 
 const (
-	RecordSRV   = "srv"
-	RecordHTTPS = "https"
+	RecordSrv   = "srv"
+	RecordHttps = "https"
 	RecordNone  = "none"
 )
 
-type Service struct {
+type ServiceData struct {
 	Key          string
 	InternalPort int
 	SrvName      string
 	Protocol     string
 	Priority     int
 	Weight       int
-	TTL          int
+	Ttl          int
 	Record       string
 }
 
-func (s Service) Request() PortRequestData {
+func (s ServiceData) Request() PortRequestData {
 	return PortRequestData{Key: s.Key, InternalPort: s.InternalPort, Protocol: s.Protocol}
 }
 
 type NodePlanData struct {
 	AName    string
-	Services []Service
-	TTL      int
+	Services []ServiceData
+	Ttl      int
 }
 
 func (n NodePlanData) Requests() []PortRequestData {
@@ -82,13 +82,13 @@ func (n NodePlanData) Requests() []PortRequestData {
 	return out
 }
 
-func (n NodePlanData) Service(key string) (Service, bool) {
+func (n NodePlanData) Service(key string) (ServiceData, bool) {
 	for _, s := range n.Services {
 		if s.Key == key {
 			return s, true
 		}
 	}
-	return Service{}, false
+	return ServiceData{}, false
 }
 
 type SrvRecordData struct {
@@ -97,7 +97,7 @@ type SrvRecordData struct {
 	Port     int
 	Priority int
 	Weight   int
-	TTL      int
+	Ttl      int
 }
 
 func (r SrvRecordData) Value() string {
@@ -109,7 +109,7 @@ type HttpsRecordData struct {
 	Target   string
 	Port     int
 	Priority int
-	TTL      int
+	Ttl      int
 }
 
 func (r HttpsRecordData) Value() string {

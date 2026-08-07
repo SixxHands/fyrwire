@@ -34,7 +34,7 @@ func TestSubnetRouterDoesNotCorruptItsInput(t *testing.T) {
 	}
 }
 
-func TestTunnelishRecognisesVPNInterfaces(t *testing.T) {
+func TestIsTunnelRecognizesVpnInterfaces(t *testing.T) {
 	for _, c := range []struct {
 		iface InterfaceData
 		want  bool
@@ -43,10 +43,9 @@ func TestTunnelishRecognisesVPNInterfaces(t *testing.T) {
 		{InterfaceData{Name: "proton0"}, true},
 		{InterfaceData{Name: "utun3"}, true},
 		{InterfaceData{Name: "eth0", PrefixLen: 24}, false},
-
 		{InterfaceData{Name: "nordlynx", PrefixLen: 32}, true},
 	} {
-		if got := c.iface.Tunnelish(); got != c.want {
+		if got := c.iface.IsTunnel(); got != c.want {
 			t.Errorf("%+v: got %v want %v", c.iface, got, c.want)
 		}
 	}
@@ -69,21 +68,21 @@ func TestInterfacesEnumeratesWithoutShellingOut(t *testing.T) {
 
 func TestOnlyLinuxClaimsToBeVerified(t *testing.T) {
 	if !(linuxBackend{}).Verified() {
-		t.Error("linux is the platform this was written on")
+		t.Error("linux backend should be marked verified")
 	}
 	for _, b := range []IHostBackend{macBackend{}, windowsBackend{}, fallbackBackend{}} {
 		if b.Verified() {
-			t.Errorf("%s has never been run on its target platform", b.Name())
+			t.Errorf("%s should not claim to be verified", b.Name())
 		}
 	}
 }
 
-func TestUnverifiedBackendsSaySoWithoutClaimingToBeBroken(t *testing.T) {
+func TestUntestedBackendsReportNote(t *testing.T) {
 	ok, why := macBackend{}.Health()
 	if !ok {
 		t.Skip("lsof and netstat both absent here")
 	}
-	if !strings.Contains(why, "never been run") {
+	if !strings.Contains(why, "untested") {
 		t.Errorf("health note = %q", why)
 	}
 }
@@ -93,7 +92,6 @@ func TestUnknownPlatformExplainsWhatStillWorks(t *testing.T) {
 	if ok {
 		t.Error("an unknown platform cannot list ports")
 	}
-
 	if !strings.Contains(why, "manually") {
 		t.Errorf("message = %q", why)
 	}
@@ -118,6 +116,5 @@ func TestLinuxFindsAPortWeJustOpened(t *testing.T) {
 			return
 		}
 	}
-	t.Errorf("did not find the port we just opened (%d) among %d listeners",
-		want, len(ports))
+	t.Errorf("did not find port %d among %d listeners", want, len(ports))
 }

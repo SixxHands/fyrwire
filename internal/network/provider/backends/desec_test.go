@@ -1,4 +1,4 @@
-package provider
+package backends
 
 import (
 	"encoding/json"
@@ -8,52 +8,51 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sixxhands/fyrwire/internal/model"
+	"github.com/sixxhands/fyrwire/internal/network/provider"
+	"github.com/sixxhands/fyrwire/internal/node/model"
 )
 
-type call struct {
+type apiCall struct {
 	Method string
 	Path   string
 	Auth   string
 	Body   string
 }
 
-func server(t *testing.T, handle func(w http.ResponseWriter, r *http.Request)) (
-	*DesecProvider, func() []call) {
+func testDesecServer(t *testing.T, onRequest func(w http.ResponseWriter, r *http.Request)) (
+	*DesecProvider, func() []apiCall) {
 	t.Helper()
-	var calls []call
+	var calls []apiCall
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			body := make([]byte, r.ContentLength)
 			if r.ContentLength > 0 {
 				r.Body.Read(body)
 			}
-			calls = append(calls, call{r.Method, r.URL.Path,
+			calls = append(calls, apiCall{r.Method, r.URL.Path,
 				r.Header.Get("Authorization"), string(body)})
-			handle(w, r)
+			onRequest(w, r)
 		}))
 	t.Cleanup(srv.Close)
 	d := &DesecProvider{Token: "secret", Domain: "example.com",
-		client: &http.Client{Timeout: 5 * time.Second}, baseURL: srv.URL,
-		minTTL: 60, minTTLAt: time.Now()}
-	return d, func() []call { return calls }
+		client: &http.Client{Timeout: 5 * time.Second}, baseUrl: srv.URL,
+		minTtl: 60, minTtlAt: time.Now()}
+	return d, func() []apiCall { return calls }
 }
 
 func TestAuthSchemeIsTokenNotBearer(t *testing.T) {
-
-	d, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
+	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"minimum_ttl":60}`))
 	})
-	d.minTTL = 0
-	d.MinimumTTL()
+	d.minTtl = 0
+	d.MinimumTtl()
 	if got := calls()[0].Auth; got != "Token secret" {
 		t.Errorf("Authorization = %q", got)
 	}
 }
 
-func TestUrlsAlwaysEndInASlash(t *testing.T) {
-
-	d, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
+func TestUrlsAlwaysEndInSlash(t *testing.T) {
+	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 	})
 	d.EnsureA("node.example.com", "1.2.3.4", 60)
@@ -64,8 +63,8 @@ func TestUrlsAlwaysEndInASlash(t *testing.T) {
 	}
 }
 
-func TestApexIsAtSignInUrlsButEmptyInJson(t *testing.T) {
-	d, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
+func TestApexIsAtSignInUrlsAndEmptyInJson(t *testing.T) {
+	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			w.WriteHeader(404)
 			return
@@ -92,8 +91,8 @@ func TestApexIsAtSignInUrlsButEmptyInJson(t *testing.T) {
 	}
 }
 
-func TestWritesGoToTheCollectionNotTheDetailEndpoint(t *testing.T) {
-	d, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
+func TestWritesGoToCollectionEndpoint(t *testing.T) {
+	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			w.WriteHeader(404)
 			return
@@ -108,33 +107,30 @@ func TestWritesGoToTheCollectionNotTheDetailEndpoint(t *testing.T) {
 	}
 }
 
-func TestA404OnAWriteIsNotReportedAsSuccess(t *testing.T) {
-	d, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
+func TestNotFoundOnWriteIsAnError(t *testing.T) {
+	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 		w.Write([]byte(`{"detail":"Not found."}`))
 	})
-
 	if _, err := d.read("SRV", "_mc._tcp.example.com"); err != nil {
-		t.Errorf("a 404 on a read must mean absent: %v", err)
+		t.Errorf("404 on read must mean absent: %v", err)
 	}
-
-	err := d.write([]rrset{{Subname: "x", Type: "A", TTL: 60,
-		Records: []string{"1.2.3.4"}}})
+	err := d.write([]rrset{{Subname: "x", Type: "A", Ttl: 60, Records: []string{"1.2.3.4"}}})
 	if err == nil {
-		t.Error("a 404 on PATCH must be an error, not a silent success")
+		t.Error("404 on PATCH must be an error")
 	}
 }
 
-func TestHttpsBodyIsExactlyRight(t *testing.T) {
-	d, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
+func TestHttpsBodyFormat(t *testing.T) {
+	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			w.WriteHeader(404)
 			return
 		}
 		w.WriteHeader(200)
 	})
-	d.EnsureHTTPS(model.HttpsRecordData{Name: "play.example.com",
-		Target: "node.example.com", Port: 51471, Priority: 1, TTL: 60})
+	d.EnsureHttps(model.HttpsRecordData{Name: "play.example.com",
+		Target: "node.example.com", Port: 51471, Priority: 1, Ttl: 60})
 	for _, c := range calls() {
 		if c.Method != "PATCH" {
 			continue
@@ -149,21 +145,21 @@ func TestHttpsBodyIsExactlyRight(t *testing.T) {
 }
 
 func TestReorderedAndQuotedParamsAreNotAChange(t *testing.T) {
-	d, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
+	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
-			json.NewEncoder(w).Encode(rrset{TTL: 60,
+			json.NewEncoder(w).Encode(rrset{Ttl: 60,
 				Records: []string{`1 node.example.com. port="51471"`}})
 			return
 		}
 		w.WriteHeader(200)
 	})
-	what, err := d.EnsureHTTPS(model.HttpsRecordData{Name: "play.example.com",
-		Target: "node.example.com", Port: 51471, Priority: 1, TTL: 60})
+	what, err := d.EnsureHttps(model.HttpsRecordData{Name: "play.example.com",
+		Target: "node.example.com", Port: 51471, Priority: 1, Ttl: 60})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if what != "" {
-		t.Errorf("reported a change that is not one: %q", what)
+		t.Errorf("unexpected change: %q", what)
 	}
 	for _, c := range calls() {
 		if c.Method == "PATCH" {
@@ -172,12 +168,12 @@ func TestReorderedAndQuotedParamsAreNotAChange(t *testing.T) {
 	}
 }
 
-func TestAMultiRecordRRsetIsNeverDeleted(t *testing.T) {
-	d, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(rrset{TTL: 60, Records: []string{
+func TestMultiRecordRrsetIsNotRemoved(t *testing.T) {
+	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(rrset{Ttl: 60, Records: []string{
 			"0 5 51471 node.example.com.", "10 0 25565 backup.example.com."}})
 	})
-	_, err := d.Delete("SRV", "_mc._tcp.example.com", "node.example.com")
+	_, err := d.Remove("SRV", "_mc._tcp.example.com", "node.example.com")
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
@@ -186,42 +182,42 @@ func TestAMultiRecordRRsetIsNeverDeleted(t *testing.T) {
 	}
 	for _, c := range calls() {
 		if c.Method == "DELETE" {
-			t.Fatal("issued a DELETE that would destroy the user's record")
+			t.Fatal("issued DELETE on multi-record rrset")
 		}
 	}
 }
 
-func TestTheWitnessChecksTheTargetNotAnyField(t *testing.T) {
-	d, calls := server(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(rrset{TTL: 60,
+func TestWitnessChecksTargetNotAnyField(t *testing.T) {
+	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(rrset{Ttl: 60,
 			Records: []string{"0 5 51471 somewhere-else.net."}})
 	})
-	if _, err := d.Delete("SRV", "_mc._tcp.example.com", "0"); err == nil {
-		t.Error("a priority field must not authorise a delete")
+	if _, err := d.Remove("SRV", "_mc._tcp.example.com", "0"); err == nil {
+		t.Error("priority field must not authorize removal")
 	}
 	for _, c := range calls() {
 		if c.Method == "DELETE" {
-			t.Fatal("issued a DELETE on a record that is not ours")
+			t.Fatal("issued DELETE on foreign record")
 		}
 	}
 }
 
-func TestDeleteWithoutAWitnessIsRefused(t *testing.T) {
-	d, _ := server(t, func(w http.ResponseWriter, r *http.Request) {})
-	_, err := d.Delete("SRV", "_mc._tcp.example.com", "")
+func TestRemoveWithoutWitnessIsRefused(t *testing.T) {
+	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {})
+	_, err := d.Remove("SRV", "_mc._tcp.example.com", "")
 	if err == nil || !strings.Contains(err.Error(), "witness") {
 		t.Errorf("err = %v", err)
 	}
 }
 
-func Test429BecomesRateLimitedWithRetryAfter(t *testing.T) {
-	d, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
+func TestRateLimitReadsRetryAfter(t *testing.T) {
+	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "7")
 		w.WriteHeader(429)
 		w.Write([]byte(`{"detail":"throttled"}`))
 	})
 	_, err := d.call("GET", d.url("domains", "example.com"), nil)
-	rl, ok := err.(*RateLimited)
+	rl, ok := err.(*provider.RateLimited)
 	if !ok {
 		t.Fatalf("err = %T %v", err, err)
 	}
@@ -235,63 +231,60 @@ func TestTransientErrorsAreRetryableAndAuthErrorsAreNot(t *testing.T) {
 		code      int
 		retryable bool
 	}{{503, true}, {500, true}, {409, true}, {403, false}, {401, false}, {400, false}} {
-		d, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
+		d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(c.code)
 			w.Write([]byte(`{"detail":"x"}`))
 		})
 		_, err := d.call("GET", d.url("domains", "example.com"), nil)
-		_, isRL := err.(*RateLimited)
+		_, isRL := err.(*provider.RateLimited)
 		if isRL != c.retryable {
 			t.Errorf("HTTP %d: retryable=%v, want %v", c.code, isRL, c.retryable)
 		}
 	}
 }
 
-func TestAMissingMinimumTtlIsRefusedRatherThanGuessed(t *testing.T) {
-	d, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
+func TestMissingMinimumTtlIsRefused(t *testing.T) {
+	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"name":"example.com"}`))
 	})
-	d.minTTL = 0
-	_, err := d.MinimumTTL()
-	if err == nil || !strings.Contains(err.Error(), "Refusing to guess") {
+	d.minTtl = 0
+	_, err := d.MinimumTtl()
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "refusing to guess") {
 		t.Errorf("err = %v", err)
 	}
 }
 
-func TestTtlBelowTheFloorIsRefusedWithTheNumberAndTheWayOut(t *testing.T) {
-	d, _ := server(t, func(w http.ResponseWriter, r *http.Request) {})
-	d.minTTL, d.minTTLAt = 3600, time.Now()
+func TestTtlBelowMinimumIsRefused(t *testing.T) {
+	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {})
+	d.minTtl, d.minTtlAt = 3600, time.Now()
 	_, err := d.EnsureA("node.example.com", "1.2.3.4", 60)
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
-	if !strings.Contains(err.Error(), "3600") ||
-		!strings.Contains(err.Error(), "exception") {
-		t.Errorf("message must name the floor and the way out: %v", err)
+	if !strings.Contains(err.Error(), "3600") || !strings.Contains(err.Error(), "exception") {
+		t.Errorf("message must name the limit and exception: %v", err)
 	}
 }
 
-func TestNameOutsideTheDomainIsRefused(t *testing.T) {
-	d, _ := server(t, func(w http.ResponseWriter, r *http.Request) {})
+func TestNameOutsideDomainIsRefused(t *testing.T) {
+	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {})
 	if _, err := d.EnsureA("node.elsewhere.org", "1.2.3.4", 60); err == nil {
 		t.Error("expected a refusal")
 	}
 }
 
-func TestUrlEscapingKeepsApexAndWildcardButNeutralisesTheRest(t *testing.T) {
-	d := &DesecProvider{Domain: "example.com", baseURL: "http://x"}
+func TestUrlEscapingKeepsApexAndWildcard(t *testing.T) {
+	d := &DesecProvider{Domain: "example.com", baseUrl: "http://x"}
 	if got := d.url("domains", "example.com", "rrsets", "@", "A"); !strings.Contains(got, "/@/") {
 		t.Errorf("apex must stay literal: %s", got)
 	}
 	if got := d.url("rrsets", "*"); !strings.Contains(got, "/*/") {
 		t.Errorf("wildcard must stay literal: %s", got)
 	}
-	if got := d.url("rrsets", "a?x=1#y"); strings.Contains(got, "?") ||
-		strings.Contains(got, "#") {
-		t.Errorf("path-rewriting characters must be escaped: %s", got)
+	if got := d.url("rrsets", "a?x=1#y"); strings.Contains(got, "?") || strings.Contains(got, "#") {
+		t.Errorf("path characters must be escaped: %s", got)
 	}
-	if got := d.url("rrsets", "_minecraft._tcp.play"); !strings.Contains(
-		got, "_minecraft._tcp.play") {
+	if got := d.url("rrsets", "_minecraft._tcp.play"); !strings.Contains(got, "_minecraft._tcp.play") {
 		t.Errorf("ordinary SRV labels must survive: %s", got)
 	}
 }

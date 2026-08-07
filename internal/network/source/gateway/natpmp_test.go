@@ -1,17 +1,19 @@
-package source
+package gateway
 
 import (
 	"encoding/binary"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/sixxhands/fyrwire/internal/model"
+	"github.com/sixxhands/fyrwire/internal/node/model"
 )
 
-func fakeGateway(t *testing.T, handle func(req []byte) []byte) string {
+func fakeGateway(t *testing.T, respond func(req []byte) []byte) string {
 	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -25,7 +27,7 @@ func fakeGateway(t *testing.T, handle func(req []byte) []byte) string {
 			if err != nil {
 				return
 			}
-			if reply := handle(buf[:n]); reply != nil {
+			if reply := respond(buf[:n]); reply != nil {
 				conn.WriteToUDP(reply, addr)
 			}
 		}
@@ -34,27 +36,16 @@ func fakeGateway(t *testing.T, handle func(req []byte) []byte) string {
 }
 
 func addrPort(t *testing.T, s string) (string, int) {
-	host, port, err := net.SplitHostPort(s)
+	t.Helper()
+	host, portText, err := net.SplitHostPort(s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var p int
-	if _, err := fmtSscan(port, &p); err != nil {
+	p, err := strconv.Atoi(portText)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return host, p
-}
-
-func fmtSscan(s string, p *int) (int, error) {
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, model.Errorf("bad port %q", s)
-		}
-		n = n*10 + int(c-'0')
-	}
-	*p = n
-	return 1, nil
 }
 
 func publicAddrReply(ip [4]byte) []byte {
@@ -79,23 +70,31 @@ func errorReply(op byte, code uint16) []byte {
 	return r
 }
 
-func TestTheGrantedPortIsUsedNotTheRequestedOne(t *testing.T) {
-	addr := fakeGateway(t, func(req []byte) []byte {
+func natpmpPortOverride(t *testing.T, port int) {
+	prev := natpmpPortForTest
+	natpmpPortForTest = port
+	t.Cleanup(func() { natpmpPortForTest = prev })
+}
+
+func startNatPmpSource(t *testing.T, respond func(req []byte) []byte) *NatPmpSource {
+	t.Helper()
+	host, port := addrPort(t, fakeGateway(t, respond))
+	natpmpPortOverride(t, port)
+	return &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
+}
+
+func TestGrantedPortIsUsedNotRequested(t *testing.T) {
+	n := startNatPmpSource(t, func(req []byte) []byte {
 		switch req[1] {
 		case opPublicAddr:
 			return publicAddrReply([4]byte{203, 0, 113, 9})
-		case opMapTCP:
-			return mapReply(opMapTCP, 25565, 51471)
+		case opMapTcp:
+			return mapReply(opMapTcp, 25565, 51471)
 		}
 		return nil
 	})
-	host, port := addrPort(t, addr)
-	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
 
-	n.Gateway = host
-	natpmpPortOverride(t, port)
-
-	res, err := n.Resolve([]model.PortRequestData{
+	res, err := n.FindEndpoints([]model.PortRequestData{
 		{Key: "mc", InternalPort: 25565, Protocol: "tcp"}})
 	if err != nil {
 		t.Fatal(err)
@@ -104,27 +103,22 @@ func TestTheGrantedPortIsUsedNotTheRequestedOne(t *testing.T) {
 		t.Errorf("host = %q", res.Host)
 	}
 	if res.Ports["mc"] != 51471 {
-		t.Errorf("port = %d, want the GRANTED 51471", res.Ports["mc"])
+		t.Errorf("port = %d, want 51471", res.Ports["mc"])
 	}
 }
 
 func TestUdpAndTcpUseDifferentOpcodes(t *testing.T) {
-
 	var mu sync.Mutex
 	seen := map[byte]bool{}
-	addr := fakeGateway(t, func(req []byte) []byte {
+	n := startNatPmpSource(t, func(req []byte) []byte {
 		mu.Lock()
 		seen[req[1]] = true
 		mu.Unlock()
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
 		}
-
 		return mapReply(req[1], binary.BigEndian.Uint16(req[4:6]), 2)
 	})
-	host, port := addrPort(t, addr)
-	natpmpPortOverride(t, port)
-	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
 	if _, err := n.Map(25565, "tcp"); err != nil {
 		t.Fatal(err)
 	}
@@ -133,28 +127,25 @@ func TestUdpAndTcpUseDifferentOpcodes(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if !seen[opMapTCP] || !seen[opMapUDP] {
-		t.Errorf("opcodes seen: %v — tcp and udp must differ", seen)
+	if !seen[opMapTcp] || !seen[opMapUdp] {
+		t.Errorf("opcodes seen: %v", seen)
 	}
 }
 
-func TestOneFailedMappingIsPartialNotFatal(t *testing.T) {
-	addr := fakeGateway(t, func(req []byte) []byte {
+func TestOneFailedMappingIsPartial(t *testing.T) {
+	n := startNatPmpSource(t, func(req []byte) []byte {
 		switch req[1] {
 		case opPublicAddr:
 			return publicAddrReply([4]byte{5, 6, 7, 8})
-		case opMapTCP:
+		case opMapTcp:
 			if binary.BigEndian.Uint16(req[4:6]) == 9999 {
-				return errorReply(opMapTCP, 4)
+				return errorReply(opMapTcp, 4)
 			}
-			return mapReply(opMapTCP, 25565, 40000)
+			return mapReply(opMapTcp, 25565, 40000)
 		}
 		return nil
 	})
-	host, port := addrPort(t, addr)
-	natpmpPortOverride(t, port)
-	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
-	res, err := n.Resolve([]model.PortRequestData{
+	res, err := n.FindEndpoints([]model.PortRequestData{
 		{Key: "ok", InternalPort: 25565, Protocol: "tcp"},
 		{Key: "bad", InternalPort: 9999, Protocol: "tcp"},
 	})
@@ -162,65 +153,32 @@ func TestOneFailedMappingIsPartialNotFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Ports["ok"] != 40000 {
-		t.Errorf("the working service must still publish: %v", res.Ports)
+		t.Errorf("ports = %v", res.Ports)
 	}
 	if !res.Partial["bad"] {
-		t.Error("the failed service must be marked partial, not dropped silently")
+		t.Error("failed service must be marked partial")
 	}
 }
 
-func TestAGatewayRefusalNamesTheLikelyCause(t *testing.T) {
-	addr := fakeGateway(t, func(req []byte) []byte {
-		return errorReply(req[1], 2)
-	})
-	host, port := addrPort(t, addr)
-	natpmpPortOverride(t, port)
-	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
+func TestGatewayRefusalMentionsPortForwarding(t *testing.T) {
+	n := startNatPmpSource(t, func(req []byte) []byte { return errorReply(req[1], 2) })
 	_, err := n.PublicAddress()
-	if err == nil {
-		t.Fatal("expected a refusal")
-	}
-	if !contains(err.Error(), "port forwarding") {
-		t.Errorf("a bare result code is not actionable: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "port forwarding") {
+		t.Errorf("err = %v", err)
 	}
 }
 
-func TestNoReplyIsAnActionableMessage(t *testing.T) {
+func TestNoReplyMentionsNatPmp(t *testing.T) {
 	n := &NatPmpSource{Gateway: "127.0.0.1", Timeout: 0.05, Retries: 1}
 	natpmpPortOverride(t, 1)
 	_, err := n.PublicAddress()
-	if err == nil {
-		t.Fatal("expected a timeout")
-	}
-	if !contains(err.Error(), "NAT-PMP") {
-		t.Errorf("message = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "NAT-PMP") {
+		t.Errorf("err = %v", err)
 	}
 }
 
-func contains(hay, needle string) bool {
-	return len(hay) >= len(needle) && (func() bool {
-		for i := 0; i+len(needle) <= len(hay); i++ {
-			if hay[i:i+len(needle)] == needle {
-				return true
-			}
-		}
-		return false
-	})()
-}
-
-func natpmpPortOverride(t *testing.T, port int) {
-	prev := natpmpPortForTest
-	natpmpPortForTest = port
-	t.Cleanup(func() { natpmpPortForTest = prev })
-}
-
-func TestAnOutOfRangePortIsRefusedNotWrapped(t *testing.T) {
-	addr := fakeGateway(t, func(req []byte) []byte {
-		return mapReply(req[1], 1, 2)
-	})
-	host, port := addrPort(t, addr)
-	natpmpPortOverride(t, port)
-	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
+func TestOutOfRangePortIsRefused(t *testing.T) {
+	n := startNatPmpSource(t, func(req []byte) []byte { return mapReply(req[1], 1, 2) })
 	for _, bad := range []int{0, -1, 65536, 70000} {
 		if _, err := n.Map(bad, "tcp"); err == nil {
 			t.Errorf("port %d was accepted", bad)
@@ -228,46 +186,39 @@ func TestAnOutOfRangePortIsRefusedNotWrapped(t *testing.T) {
 	}
 }
 
-func TestAGrantOfPortZeroIsNotAMapping(t *testing.T) {
-	addr := fakeGateway(t, func(req []byte) []byte {
+func TestPortZeroGrantIsRejected(t *testing.T) {
+	n := startNatPmpSource(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
 		}
 		return mapReply(req[1], 25565, 0)
 	})
-	host, port := addrPort(t, addr)
-	natpmpPortOverride(t, port)
-	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
 	if _, err := n.Map(25565, "tcp"); err == nil {
-		t.Error("port 0 was accepted as a granted mapping")
+		t.Error("port 0 was accepted")
 	}
-
-	res, err := n.Resolve([]model.PortRequestData{
+	res, err := n.FindEndpoints([]model.PortRequestData{
 		{Key: "mc", InternalPort: 25565, Protocol: "tcp"}})
 	if err == nil && !res.Partial["mc"] {
-		t.Errorf("a zero grant must be partial, got %+v", res)
+		t.Errorf("zero grant must be partial: %+v", res)
 	}
 }
 
-func TestAFractionalTimeoutIsNotTruncatedToZero(t *testing.T) {
-	addr := fakeGateway(t, func(req []byte) []byte {
+func TestFractionalTimeoutIsNotTruncated(t *testing.T) {
+	n := startNatPmpSource(t, func(req []byte) []byte {
 		time.Sleep(120 * time.Millisecond)
 		return publicAddrReply([4]byte{9, 9, 9, 9})
 	})
-	host, port := addrPort(t, addr)
-	natpmpPortOverride(t, port)
-	n := &NatPmpSource{Gateway: host, Timeout: 0.5, Retries: 1}
+	n.Timeout = 0.5
 	got, err := n.PublicAddress()
 	if err != nil {
-		t.Fatalf("a 0.5s timeout must wait half a second, not zero: %v", err)
+		t.Fatalf("0.5s timeout failed: %v", err)
 	}
 	if got != "9.9.9.9" {
 		t.Errorf("got %q", got)
 	}
 }
 
-func TestASubstitutedInternalPortIsDetectedAsSinglePort(t *testing.T) {
-
+func TestSubstitutedInternalPortIsDetectedAsSinglePort(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{203, 0, 113, 49})
@@ -286,20 +237,17 @@ func TestASubstitutedInternalPortIsDetectedAsSinglePort(t *testing.T) {
 	if !single || got != 52329 {
 		t.Fatalf("SinglePort = (%d, %v), want (52329, true)", got, single)
 	}
-	res, err := n.Resolve([]model.PortRequestData{
+	res, err := n.FindEndpoints([]model.PortRequestData{
 		{Key: "mc", InternalPort: 37772, Protocol: "tcp"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Ports["mc"] != 52329 {
-		t.Errorf("published %d — must be the port the gateway actually "+
-			"forwards, not the one it invented for our internal port",
-			res.Ports["mc"])
+		t.Errorf("published %d, want 52329", res.Ports["mc"])
 	}
 }
 
-func TestAConformingGatewayStillGetsPerServiceMappings(t *testing.T) {
-
+func TestConformingGatewayGetsPerServiceMappings(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -314,9 +262,9 @@ func TestAConformingGatewayStillGetsPerServiceMappings(t *testing.T) {
 	natpmpPortOverride(t, port)
 	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
 	if _, single := n.SinglePort("tcp"); single {
-		t.Error("a conforming gateway must not be treated as single-port")
+		t.Error("conforming gateway must not be treated as single-port")
 	}
-	res, err := n.Resolve([]model.PortRequestData{
+	res, err := n.FindEndpoints([]model.PortRequestData{
 		{Key: "mc", InternalPort: 25565, Protocol: "tcp"}})
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +274,7 @@ func TestAConformingGatewayStillGetsPerServiceMappings(t *testing.T) {
 	}
 }
 
-func TestEveryServiceSharesTheOnePortOnASinglePortGateway(t *testing.T) {
+func TestServicesSharePortOnSinglePortGateway(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -341,7 +289,7 @@ func TestEveryServiceSharesTheOnePortOnASinglePortGateway(t *testing.T) {
 	var warnings []string
 	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1,
 		Log: func(s string) { warnings = append(warnings, s) }}
-	res, err := n.Resolve([]model.PortRequestData{
+	res, err := n.FindEndpoints([]model.PortRequestData{
 		{Key: "mc", InternalPort: 25565, Protocol: "tcp"},
 		{Key: "vh", InternalPort: 2456, Protocol: "tcp"}})
 	if err != nil {
@@ -349,15 +297,15 @@ func TestEveryServiceSharesTheOnePortOnASinglePortGateway(t *testing.T) {
 	}
 	for k, v := range res.Ports {
 		if v != 52329 {
-			t.Errorf("%s got %d — one granted port cannot become two", k, v)
+			t.Errorf("%s got %d, want 52329", k, v)
 		}
 	}
 	if len(warnings) == 0 {
-		t.Error("sharing one port between services must be said out loud")
+		t.Error("expected warning when sharing a single port")
 	}
 }
 
-func TestAGatewayThatAnswersAboutADifferentPortIsNotBelieved(t *testing.T) {
+func TestMismatchedInternalPortReplyIsRejected(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -372,11 +320,11 @@ func TestAGatewayThatAnswersAboutADifferentPortIsNotBelieved(t *testing.T) {
 	natpmpPortOverride(t, port)
 	n := &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
 	if _, err := n.Map(25565, "tcp"); err == nil {
-		t.Error("a reply about a different internal port must not be believed")
+		t.Error("reply for a different internal port must be rejected")
 	}
 }
 
-func TestTheGrantedLeaseIsReadNotAssumed(t *testing.T) {
+func TestGrantedLeaseIsRecordedAndWarnsWhenShort(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -394,16 +342,14 @@ func TestTheGrantedLeaseIsReadNotAssumed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := n.GrantedLifetime(); got != 60 {
-		t.Errorf("GrantedLifetime = %d, want the 60 the gateway actually gave", got)
+		t.Errorf("GrantedLifetime = %d, want 60", got)
 	}
 	if len(warnings) == 0 {
-		t.Error("a lease shorter than requested must be said out loud — silently " +
-			"refreshing too slowly is an intermittent outage with no error")
+		t.Error("expected warning for short lease")
 	}
 }
 
-func TestAGatewayRestartIsDetectedAndForcesARepublish(t *testing.T) {
-
+func TestGatewayRestartIsDetected(t *testing.T) {
 	var epoch atomic.Uint32
 	epoch.Store(5000)
 	addr := fakeGateway(t, func(req []byte) []byte {
@@ -424,28 +370,28 @@ func TestAGatewayRestartIsDetectedAndForcesARepublish(t *testing.T) {
 
 	n.Map(25565, "tcp")
 	if n.TookRestart() {
-		t.Fatal("no restart has happened yet")
+		t.Fatal("unexpected restart flag")
 	}
 	epoch.Store(6000)
 	n.Map(25565, "tcp")
 	if n.TookRestart() {
-		t.Fatal("a rising epoch is not a restart")
+		t.Fatal("rising epoch is not a restart")
 	}
 	epoch.Store(12)
 	n.Map(25565, "tcp")
 	if !n.TookRestart() {
-		t.Fatal("an epoch going backwards means every mapping was lost")
+		t.Fatal("backwards epoch must trigger restart")
 	}
 	if n.TookRestart() {
-		t.Error("the flag must clear, or every cycle republishes forever")
+		t.Error("restart flag must clear after read")
 	}
 	found := false
 	for _, w := range warnings {
-		if contains(w, "restarted") {
+		if strings.Contains(w, "restarted") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("the restart must be reported: %v", warnings)
+		t.Errorf("restart warning missing: %v", warnings)
 	}
 }

@@ -20,7 +20,7 @@ func goos() string {
 	return runtime.GOOS
 }
 
-func SetGOOSForTest(v string) func() {
+func SetGoosForTest(v string) func() {
 	prev := goosOverride
 	goosOverride = v
 	return func() { goosOverride = prev }
@@ -57,14 +57,12 @@ func StateDir() string {
 	}
 	switch goos() {
 	case "windows":
-
 		base := os.Getenv("LOCALAPPDATA")
 		if base == "" {
 			base = filepath.Join(home(), "AppData", "Local")
 		}
 		return filepath.Join(base, appDisplay)
 	case "darwin":
-
 		return filepath.Join(home(), "Library", "Application Support", appDisplay)
 	}
 	return filepath.Join(home(), ".local", "state", app)
@@ -96,10 +94,10 @@ func ServiceDir() string {
 
 func LegacyLocations() [][2]string {
 	var out [][2]string
-	oldCfg := filepath.Join(home(), ".config", app, "fyrwire.toml")
+	oldConfig := filepath.Join(home(), ".config", app, "fyrwire.toml")
 	oldState := filepath.Join(home(), ".local", "state", app, "state.json")
-	if oldCfg != ConfigFile() {
-		out = append(out, [2]string{oldCfg, ConfigFile()})
+	if oldConfig != ConfigFile() {
+		out = append(out, [2]string{oldConfig, ConfigFile()})
 	}
 	if oldState != StateFile() {
 		out = append(out, [2]string{oldState, StateFile()})

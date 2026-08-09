@@ -30,10 +30,10 @@ const (
 	reset = "\x1b[0m"
 )
 
-func Render(colour bool) string {
+func Render(color bool) string {
 	var b strings.Builder
 	for _, l := range lines {
-		if colour {
+		if color {
 			b.WriteString(flame + l + reset + "\n")
 		} else {
 			b.WriteString(l + "\n")
@@ -44,7 +44,7 @@ func Render(colour bool) string {
 		pad = 0
 	}
 	b.WriteString(strings.Repeat(" ", pad))
-	if colour {
+	if color {
 		b.WriteString(dim + Tagline + reset)
 	} else {
 		b.WriteString(Tagline)

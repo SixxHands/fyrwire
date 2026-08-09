@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sixxhands/fyrwire/internal/hostinfo"
-	"github.com/sixxhands/fyrwire/internal/model"
-	"github.com/sixxhands/fyrwire/internal/source"
+	"github.com/sixxhands/fyrwire/internal/network/hostinfo"
+	"github.com/sixxhands/fyrwire/internal/network/source/gateway"
+	"github.com/sixxhands/fyrwire/internal/node/model"
 )
 
 func GatewayCandidates() [][2]string {
@@ -23,23 +23,23 @@ func GatewayCandidates() [][2]string {
 		out = append(out, [2]string{addr, why})
 	}
 	for _, i := range hostinfo.Interfaces() {
-		if i.Tunnelish() {
+		if i.IsTunnel() {
 			add(hostinfo.SubnetRouter(i.Address), "tunnel "+i.Name)
 		}
 	}
 	if egress := hostinfo.EgressAddress(); egress != "" {
-		add(hostinfo.SubnetRouter(egress), "the route to the internet")
+		add(hostinfo.SubnetRouter(egress), "default route")
 	}
 	for _, i := range hostinfo.Interfaces() {
-		if !i.Tunnelish() {
+		if !i.IsTunnel() {
 			add(hostinfo.SubnetRouter(i.Address), "interface "+i.Name)
 		}
 	}
 	return out
 }
 
-func Probe(gateway string) string {
-	n := &source.NatPmpSource{Gateway: gateway, Timeout: 1.5, Retries: 1}
+func CheckGateway(gatewayAddress string) string {
+	n := &gateway.NatPmpSource{Gateway: gatewayAddress, Timeout: 1.5, Retries: 1}
 	addr, err := n.PublicAddress()
 	if err != nil {
 		return ""
@@ -49,7 +49,7 @@ func Probe(gateway string) string {
 
 func FindGateway() (gateway, public, why string) {
 	for _, c := range GatewayCandidates() {
-		if pub := Probe(c[0]); pub != "" {
+		if pub := CheckGateway(c[0]); pub != "" {
 			return c[0], pub, c[1]
 		}
 	}
@@ -58,36 +58,35 @@ func FindGateway() (gateway, public, why string) {
 
 type DomainData struct {
 	Name       string
-	MinimumTTL int
+	MinimumTtl int
 }
 
 func DesecDomains(token string) ([]DomainData, error) {
-	body, err := get("https://desec.io/api/v1/domains/", "Token "+token)
+	body, err := fetchJson("https://desec.io/api/v1/domains/", "Token "+token)
 	if err != nil {
 		return nil, err
 	}
 	var rows []struct {
 		Name       string `json:"name"`
-		MinimumTTL int    `json:"minimum_ttl"`
+		MinimumTtl int    `json:"minimum_ttl"`
 	}
 	if err := json.Unmarshal(body, &rows); err != nil {
 		return nil, model.Errorf("desec sent an unreadable domain list")
 	}
 	out := make([]DomainData, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, DomainData{Name: r.Name, MinimumTTL: r.MinimumTTL})
+		out = append(out, DomainData{Name: r.Name, MinimumTtl: r.MinimumTtl})
 	}
 	return out, nil
 }
 
 type ZoneData struct {
-	ID   string
-	Name string
+	Id   string `json:"id"`
+	Name string `json:"name"`
 }
 
 func CloudflareZones(token string) ([]ZoneData, error) {
-	body, err := get(
-		"https://api.cloudflare.com/client/v4/zones?per_page=50", "Bearer "+token)
+	body, err := fetchJson("https://api.cloudflare.com/client/v4/zones?per_page=50", "Bearer "+token)
 	if err != nil {
 		return nil, err
 	}
@@ -101,19 +100,17 @@ func CloudflareZones(token string) ([]ZoneData, error) {
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, model.Errorf("cloudflare sent unreadable JSON")
 	}
-
 	if !env.Success {
 		msgs := make([]string, 0, len(env.Errors))
 		for _, e := range env.Errors {
 			msgs = append(msgs, e.Message)
 		}
-		return nil, model.Errorf("cloudflare rejected the token: %s",
-			strings.Join(msgs, "; "))
+		return nil, model.Errorf("cloudflare rejected the token: %s", strings.Join(msgs, "; "))
 	}
 	return env.Result, nil
 }
 
-func get(url, auth string) ([]byte, error) {
+func fetchJson(url, auth string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -135,7 +132,7 @@ func get(url, auth string) ([]byte, error) {
 	return body, nil
 }
 
-func ListeningPorts() []hostinfo.Port {
-	ports, _ := hostinfo.Current().ListeningPorts()
+func ListeningPorts() []hostinfo.PortData {
+	ports, _ := hostinfo.HostBackendFactory{}.Create().ListeningPorts()
 	return ports
 }

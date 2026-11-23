@@ -71,7 +71,7 @@ func startTestListener(t *testing.T, front, backend int, options OptionsData) *L
 	return l
 }
 
-func TestConcurrentDatagramsFromOneClientOpenOneSession(t *testing.T) {
+func Test_concurrent_datagrams_from_one_client_open_one_session(t *testing.T) {
 	backend, _ := udpEcho(t, "r")
 	l := startTestListener(t, freePort(t), backend, OptionsData{})
 	defer l.Stop()
@@ -95,7 +95,7 @@ func TestConcurrentDatagramsFromOneClientOpenOneSession(t *testing.T) {
 	}
 }
 
-func TestPortCanBeReboundImmediatelyAfterStop(t *testing.T) {
+func Test_port_can_be_rebound_immediately_after_stop(t *testing.T) {
 	backend, _ := udpEcho(t, "z")
 	front := freePort(t)
 	first := startTestListener(t, front, backend, OptionsData{})
@@ -104,7 +104,7 @@ func TestPortCanBeReboundImmediatelyAfterStop(t *testing.T) {
 	second.Stop()
 }
 
-func TestStopWaitsForGoroutines(t *testing.T) {
+func Test_stop_waits_for_goroutines(t *testing.T) {
 	dead, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestStopWaitsForGoroutines(t *testing.T) {
 	}
 }
 
-func TestZeroLengthDatagramCreatesNoSession(t *testing.T) {
+func Test_zero_length_datagram_creates_no_session(t *testing.T) {
 	backend, seen := udpEcho(t, "z")
 	front := freePort(t)
 	l := startTestListener(t, front, backend, OptionsData{DropZeroLength: true})
@@ -142,7 +142,7 @@ func TestZeroLengthDatagramCreatesNoSession(t *testing.T) {
 	}
 }
 
-func TestMaxDatagramRoundTripsWithoutTruncation(t *testing.T) {
+func Test_max_datagram_round_trips_without_truncation(t *testing.T) {
 	backend, _ := udpEcho(t, "big")
 	front := freePort(t)
 	l := startTestListener(t, front, backend, OptionsData{})
@@ -171,7 +171,7 @@ func TestMaxDatagramRoundTripsWithoutTruncation(t *testing.T) {
 	}
 }
 
-func TestNoSessionOpenedAfterStop(t *testing.T) {
+func Test_no_session_opened_after_stop(t *testing.T) {
 	backend, _ := udpEcho(t, "x")
 	l := startTestListener(t, freePort(t), backend, OptionsData{})
 	l.Stop()
@@ -183,7 +183,7 @@ func TestNoSessionOpenedAfterStop(t *testing.T) {
 	}
 }
 
-func TestUdpStopReturnsWhileDatagramsArrive(t *testing.T) {
+func Test_udp_stop_returns_while_datagrams_arrive(t *testing.T) {
 	backend, _ := udpEcho(t, "x")
 	front := freePort(t)
 	l := startTestListener(t, front, backend, OptionsData{})
@@ -227,28 +227,28 @@ func sendUdpFlood(wg *sync.WaitGroup, stop <-chan struct{}, front int) {
 	}
 }
 
-type manualTime struct {
+type manualTimeTest struct {
 	mu sync.Mutex
 	t  time.Time
 }
 
-func createManualTime() *manualTime {
-	return &manualTime{t: time.Unix(1_000_000, 0)}
+func createManualTime() *manualTimeTest {
+	return &manualTimeTest{t: time.Unix(1_000_000, 0)}
 }
 
-func (m *manualTime) Now() time.Time {
+func (m *manualTimeTest) Now() time.Time {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.t
 }
 
-func (m *manualTime) advance(d time.Duration) {
+func (m *manualTimeTest) advance(d time.Duration) {
 	m.mu.Lock()
 	m.t = m.t.Add(d)
 	m.mu.Unlock()
 }
 
-func policyListener(t *testing.T, options OptionsData) (*Listener, *manualTime) {
+func policyListener(t *testing.T, options OptionsData) (*Listener, *manualTimeTest) {
 	t.Helper()
 	tm := createManualTime()
 	options.Now = tm.Now
@@ -270,7 +270,7 @@ func sendDatagram(t *testing.T, l *Listener, from string, message string) {
 	l.onClient([]byte(message), addr)
 }
 
-func TestUnrepliedSessionExpiresOnShortTimer(t *testing.T) {
+func Test_unreplied_session_expires_on_short_timer(t *testing.T) {
 	l, tm := policyListener(t, OptionsData{})
 	sendDatagram(t, l, "1.2.3.4:5000", "x")
 	tm.advance(31 * time.Second)
@@ -279,7 +279,7 @@ func TestUnrepliedSessionExpiresOnShortTimer(t *testing.T) {
 	}
 }
 
-func TestRepliedSessionUsesLongTimer(t *testing.T) {
+func Test_replied_session_uses_long_timer(t *testing.T) {
 	l, tm := policyListener(t, OptionsData{})
 	sendDatagram(t, l, "1.2.3.4:5000", "x")
 	l.mu.Lock()
@@ -297,7 +297,7 @@ func TestRepliedSessionUsesLongTimer(t *testing.T) {
 	}
 }
 
-func TestBackendOnlyTrafficKeepsSessionAlive(t *testing.T) {
+func Test_backend_only_traffic_keeps_session_alive(t *testing.T) {
 	l, tm := policyListener(t, OptionsData{})
 	sendDatagram(t, l, "1.2.3.4:5000", "x")
 	l.mu.Lock()
@@ -333,7 +333,7 @@ func firstSession(l *Listener) *udpSession {
 	return nil
 }
 
-func TestSessionTableCapDropsOverflow(t *testing.T) {
+func Test_session_table_cap_drops_overflow(t *testing.T) {
 	l, _ := policyListener(t, OptionsData{MaxSessions: 2, MaxPerIp: 100})
 	for i := 0; i < 4; i++ {
 		sendDatagram(t, l, net.JoinHostPort("1.2.3.4", strconv.Itoa(5000+i)), "x")
@@ -343,7 +343,7 @@ func TestSessionTableCapDropsOverflow(t *testing.T) {
 	}
 }
 
-func TestPerIpCapLimitsSingleSource(t *testing.T) {
+func Test_per_ip_cap_limits_single_source(t *testing.T) {
 	l, _ := policyListener(t, OptionsData{MaxPerIp: 2})
 	for i := 0; i < 4; i++ {
 		sendDatagram(t, l, net.JoinHostPort("9.9.9.9", strconv.Itoa(6000+i)), "x")
@@ -353,7 +353,7 @@ func TestPerIpCapLimitsSingleSource(t *testing.T) {
 	}
 }
 
-func TestRateLimiterLimitsNewSessions(t *testing.T) {
+func Test_rate_limiter_limits_new_sessions(t *testing.T) {
 	l, tm := policyListener(t, OptionsData{NewPerSec: 2, MaxPerIp: 100})
 	for i := 0; i < 5; i++ {
 		sendDatagram(t, l, net.JoinHostPort("1.2.3.4", strconv.Itoa(7000+i)), "x")
@@ -368,7 +368,7 @@ func TestRateLimiterLimitsNewSessions(t *testing.T) {
 	}
 }
 
-func TestEvictionUpdatesPerIpCount(t *testing.T) {
+func Test_eviction_updates_per_ip_count(t *testing.T) {
 	l, _ := policyListener(t, OptionsData{})
 	sendDatagram(t, l, "5.5.5.5:1234", "x")
 	s := firstSession(l)
@@ -381,7 +381,7 @@ func TestEvictionUpdatesPerIpCount(t *testing.T) {
 	}
 }
 
-func TestByteCountersAreCumulative(t *testing.T) {
+func Test_byte_counters_are_cumulative(t *testing.T) {
 	l, _ := policyListener(t, OptionsData{})
 	sendDatagram(t, l, "1.2.3.4:5000", "hello")
 	before := l.Stats()["c2s_bytes"].(int64)

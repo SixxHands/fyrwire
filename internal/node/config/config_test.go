@@ -21,7 +21,7 @@ func corpusDir(t *testing.T) string {
 	return dir
 }
 
-func TestConfigCorpus(t *testing.T) {
+func Test_config_corpus(t *testing.T) {
 	dir := corpusDir(t)
 	entries, err := os.ReadDir(dir)
 	if err != nil {

@@ -13,46 +13,46 @@ import (
 	"github.com/sixxhands/fyrwire/internal/node/model"
 )
 
-type fakeSource struct {
+type fakeSourceTest struct {
 	data model.EndpointData
 	err  error
 	hits int
 }
 
-func (source *fakeSource) Name() string { return "fake" }
-func (source *fakeSource) FindEndpoints([]model.PortRequestData) (model.EndpointData, error) {
+func (source *fakeSourceTest) Name() string { return "fake" }
+func (source *fakeSourceTest) FindEndpoints([]model.PortRequestData) (model.EndpointData, error) {
 	source.hits++
 	return source.data, source.err
 }
 
-type fakeProvider struct {
+type fakeProviderTest struct {
 	aCalls   []string
 	srvCalls []model.SrvRecordData
 	err      error
 }
 
-func (dns *fakeProvider) Name() string { return "fake" }
-func (dns *fakeProvider) EnsureA(name, ip string, ttl int) (string, error) {
+func (dns *fakeProviderTest) Name() string { return "fake" }
+func (dns *fakeProviderTest) EnsureA(name, ip string, ttl int) (string, error) {
 	if dns.err != nil {
 		return "", dns.err
 	}
 	dns.aCalls = append(dns.aCalls, name+"="+ip)
 	return "set A " + name, nil
 }
-func (dns *fakeProvider) EnsureSrv(record model.SrvRecordData) (string, error) {
+func (dns *fakeProviderTest) EnsureSrv(record model.SrvRecordData) (string, error) {
 	if dns.err != nil {
 		return "", dns.err
 	}
 	dns.srvCalls = append(dns.srvCalls, record)
 	return "set SRV " + record.Name, nil
 }
-func (dns *fakeProvider) EnsureHttps(record model.HttpsRecordData) (string, error) {
+func (dns *fakeProviderTest) EnsureHttps(record model.HttpsRecordData) (string, error) {
 	if dns.err != nil {
 		return "", dns.err
 	}
 	return "set HTTPS " + record.Name, nil
 }
-func (dns *fakeProvider) Remove(recordType, name, expect string) (string, error) {
+func (dns *fakeProviderTest) Remove(recordType, name, expect string) (string, error) {
 	return "", nil
 }
 
@@ -71,7 +71,7 @@ func testPlan() model.NodePlanData {
 	}
 }
 
-func buildTestAgent(t *testing.T, src *fakeSource, prov *fakeProvider, plan model.NodePlanData, statePath string, options agent.OptionsData) *agent.Agent {
+func buildTestAgent(t *testing.T, src *fakeSourceTest, prov *fakeProviderTest, plan model.NodePlanData, statePath string, options agent.OptionsData) *agent.Agent {
 	t.Helper()
 	blueprint, err := agent.CreateAgentBlueprint(src, prov, plan, statePath, options)
 	if err != nil {
@@ -80,7 +80,7 @@ func buildTestAgent(t *testing.T, src *fakeSource, prov *fakeProvider, plan mode
 	return agent.AgentFactory{}.Create(blueprint)
 }
 
-func newTestAgent(t *testing.T, src *fakeSource, prov *fakeProvider) *agent.Agent {
+func newTestAgent(t *testing.T, src *fakeSourceTest, prov *fakeProviderTest) *agent.Agent {
 	t.Helper()
 	return buildTestAgent(t, src, prov, testPlan(), filepath.Join(t.TempDir(), "state.json"), agent.OptionsData{})
 }
@@ -89,9 +89,9 @@ func endpoints(host string, ports map[string]int) model.EndpointData {
 	return model.EndpointData{Host: host, Ports: ports, Partial: map[string]bool{}}
 }
 
-func TestPublishesOnlyOnChange(t *testing.T) {
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	prov := &fakeProvider{}
+func Test_publishes_only_on_change(t *testing.T) {
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	prov := &fakeProviderTest{}
 	runner := newTestAgent(t, src, prov)
 
 	first := runner.Tick(false)
@@ -107,9 +107,9 @@ func TestPublishesOnlyOnChange(t *testing.T) {
 	}
 }
 
-func TestRotatedPortIsPublished(t *testing.T) {
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	prov := &fakeProvider{}
+func Test_rotated_port_is_published(t *testing.T) {
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	prov := &fakeProviderTest{}
 	runner := newTestAgent(t, src, prov)
 	runner.Tick(false)
 	src.data = endpoints("1.2.3.4", map[string]int{"mc": 40000})
@@ -122,9 +122,9 @@ func TestRotatedPortIsPublished(t *testing.T) {
 	}
 }
 
-func TestAddressChangeLeavesSrvAlone(t *testing.T) {
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	prov := &fakeProvider{}
+func Test_address_change_leaves_srv_alone(t *testing.T) {
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	prov := &fakeProviderTest{}
 	runner := newTestAgent(t, src, prov)
 	runner.Tick(false)
 	src.data = endpoints("5.6.7.8", map[string]int{"mc": 51471})
@@ -137,9 +137,9 @@ func TestAddressChangeLeavesSrvAlone(t *testing.T) {
 	}
 }
 
-func TestFailureNeverClearsDns(t *testing.T) {
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	prov := &fakeProvider{}
+func Test_failure_never_clears_dns(t *testing.T) {
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	prov := &fakeProviderTest{}
 	runner := newTestAgent(t, src, prov)
 	runner.Tick(false)
 	before := len(prov.aCalls) + len(prov.srvCalls)
@@ -157,17 +157,17 @@ func TestFailureNeverClearsDns(t *testing.T) {
 	}
 }
 
-func TestPartialServiceDoesNotBlockOthers(t *testing.T) {
+func Test_partial_service_does_not_block_others(t *testing.T) {
 	plan := testPlan()
 	plan.Services = append(plan.Services, model.ServiceData{
 		Key: "vh", InternalPort: 2456,
 		SrvName: "_valheim._udp.example.com", Protocol: "udp", Weight: 5,
 		Record: model.RecordSrv,
 	})
-	src := &fakeSource{data: model.EndpointData{
+	src := &fakeSourceTest{data: model.EndpointData{
 		Host: "1.2.3.4", Ports: map[string]int{"mc": 51471}, Partial: map[string]bool{"vh": true},
 	}}
-	prov := &fakeProvider{}
+	prov := &fakeProviderTest{}
 	runner := buildTestAgent(t, src, prov, plan, filepath.Join(t.TempDir(), "s.json"), agent.OptionsData{})
 	result := runner.Tick(false)
 	if !result.Ok {
@@ -181,34 +181,34 @@ func TestPartialServiceDoesNotBlockOthers(t *testing.T) {
 	}
 }
 
-func TestStateSurvivesRestart(t *testing.T) {
+func Test_state_survives_restart(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	buildTestAgent(t, src, &fakeProvider{}, testPlan(), statePath, agent.OptionsData{}).Tick(false)
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	buildTestAgent(t, src, &fakeProviderTest{}, testPlan(), statePath, agent.OptionsData{}).Tick(false)
 
-	restarted := buildTestAgent(t, src, &fakeProvider{}, testPlan(), statePath, agent.OptionsData{})
+	restarted := buildTestAgent(t, src, &fakeProviderTest{}, testPlan(), statePath, agent.OptionsData{})
 	if result := restarted.Tick(false); len(result.Changes) != 0 {
 		t.Errorf("restart republished unnecessarily: %v", result.Changes)
 	}
 }
 
-func TestCorruptStateFileIsNotFatal(t *testing.T) {
+func Test_corrupt_state_file_is_not_fatal(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(statePath, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	runner := buildTestAgent(t, src, &fakeProvider{}, testPlan(), statePath, agent.OptionsData{})
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	runner := buildTestAgent(t, src, &fakeProviderTest{}, testPlan(), statePath, agent.OptionsData{})
 	if result := runner.Tick(false); !result.Ok {
 		t.Errorf("corrupt state stopped agent: %v", result.Err)
 	}
 }
 
-func TestUdpIsNotRelayedUnlessEnabled(t *testing.T) {
+func Test_udp_is_not_relayed_unless_enabled(t *testing.T) {
 	plan := testPlan()
 	plan.Services[0].Protocol = "udp"
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	runner := buildTestAgent(t, src, &fakeProvider{}, plan, filepath.Join(t.TempDir(), "s.json"),
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	runner := buildTestAgent(t, src, &fakeProviderTest{}, plan, filepath.Join(t.TempDir(), "s.json"),
 		agent.OptionsData{Relay: true, RelayUdp: false, BindHost: "127.0.0.1", Udp: relay.UdpOptionsData{}})
 	defer runner.Stop()
 	runner.Tick(false)
@@ -217,9 +217,9 @@ func TestUdpIsNotRelayedUnlessEnabled(t *testing.T) {
 	}
 }
 
-func TestLoopSurvivesRateLimit(t *testing.T) {
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	prov := &fakeProvider{err: &provider.RateLimited{Msg: "slow down"}}
+func Test_loop_survives_rate_limit(t *testing.T) {
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	prov := &fakeProviderTest{err: &provider.RateLimited{Msg: "slow down"}}
 	runner := newTestAgent(t, src, prov)
 	done := make(chan struct{})
 	go func() {
@@ -236,10 +236,10 @@ func TestLoopSurvivesRateLimit(t *testing.T) {
 	}
 }
 
-func TestRateLimitBacksOffMoreThanGenericError(t *testing.T) {
+func Test_rate_limit_backs_off_more_than_generic_error(t *testing.T) {
 	elapsedFor := func(err error) time.Duration {
-		src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-		runner := newTestAgent(t, src, &fakeProvider{err: err})
+		src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+		runner := newTestAgent(t, src, &fakeProviderTest{err: err})
 		start := time.Now()
 		runner.Run(80*time.Millisecond, 0, 3)
 		return time.Since(start)
@@ -251,9 +251,9 @@ func TestRateLimitBacksOffMoreThanGenericError(t *testing.T) {
 	}
 }
 
-func TestRetryAfterIsRespected(t *testing.T) {
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	runner := newTestAgent(t, src, &fakeProvider{
+func Test_retry_after_is_respected(t *testing.T) {
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	runner := newTestAgent(t, src, &fakeProviderTest{
 		err: &provider.RateLimited{Msg: "slow", RetryAfter: 400 * time.Millisecond},
 	})
 	start := time.Now()
@@ -263,7 +263,7 @@ func TestRetryAfterIsRespected(t *testing.T) {
 	}
 }
 
-func TestWritesWithinOneCycleAreSpaced(t *testing.T) {
+func Test_writes_within_one_cycle_are_spaced(t *testing.T) {
 	plan := testPlan()
 	for _, key := range []string{"a", "b", "c"} {
 		plan.Services = append(plan.Services, model.ServiceData{
@@ -272,8 +272,8 @@ func TestWritesWithinOneCycleAreSpaced(t *testing.T) {
 			Weight: 5, Record: model.RecordSrv,
 		})
 	}
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 1, "a": 2, "b": 3, "c": 4})}
-	runner := buildTestAgent(t, src, &fakeProvider{}, plan, filepath.Join(t.TempDir(), "s.json"), agent.OptionsData{})
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 1, "a": 2, "b": 3, "c": 4})}
+	runner := buildTestAgent(t, src, &fakeProviderTest{}, plan, filepath.Join(t.TempDir(), "s.json"), agent.OptionsData{})
 	start := time.Now()
 	runner.Tick(false)
 	if elapsed := time.Since(start); elapsed < 4*agent.WriteSpacing {
@@ -281,9 +281,9 @@ func TestWritesWithinOneCycleAreSpaced(t *testing.T) {
 	}
 }
 
-func TestFirstWriteOfCycleIsNotDelayed(t *testing.T) {
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	runner := newTestAgent(t, src, &fakeProvider{})
+func Test_first_write_of_cycle_is_not_delayed(t *testing.T) {
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	runner := newTestAgent(t, src, &fakeProviderTest{})
 	runner.Tick(false)
 	src.data = endpoints("5.6.7.8", map[string]int{"mc": 51471})
 	start := time.Now()
@@ -303,10 +303,10 @@ func startRelayBlocker(t *testing.T) (net.Listener, int) {
 	return blocker, blocker.Addr().(*net.TCPAddr).Port
 }
 
-func TestPortNotPublishedWhenRelayCannotBind(t *testing.T) {
+func Test_port_not_published_when_relay_cannot_bind(t *testing.T) {
 	_, taken := startRelayBlocker(t)
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": taken})}
-	prov := &fakeProvider{}
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": taken})}
+	prov := &fakeProviderTest{}
 	runner := buildTestAgent(t, src, prov, testPlan(), filepath.Join(t.TempDir(), "s.json"),
 		agent.OptionsData{Relay: true, BindHost: "127.0.0.1", Log: func(string) {}})
 	defer runner.Stop()
@@ -322,10 +322,10 @@ func TestPortNotPublishedWhenRelayCannotBind(t *testing.T) {
 	}
 }
 
-func TestFailedRelayRecoversWhenPortFrees(t *testing.T) {
+func Test_failed_relay_recovers_when_port_frees(t *testing.T) {
 	blocker, taken := startRelayBlocker(t)
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": taken})}
-	prov := &fakeProvider{}
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": taken})}
+	prov := &fakeProviderTest{}
 	runner := buildTestAgent(t, src, prov, testPlan(), filepath.Join(t.TempDir(), "s.json"),
 		agent.OptionsData{Relay: true, BindHost: "127.0.0.1", Log: func(string) {}})
 	defer runner.Stop()

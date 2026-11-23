@@ -13,12 +13,12 @@ import (
 	"github.com/sixxhands/fyrwire/internal/node/model"
 )
 
-type testAlertObserver struct {
+type alertObserverTest struct {
 	notifier *notify.Notifier
 	nodeName string
 }
 
-func (observer testAlertObserver) OnTick(result agent.TickResult, state *agent.AgentState) {
+func (observer alertObserverTest) OnTick(result agent.TickResult, state *agent.AgentState) {
 	alertState := &notify.AlertState{
 		Down:     state.AlertedDown,
 		Services: state.AlertedServices,
@@ -64,17 +64,17 @@ func buildAlertObserver(t *testing.T, webhook string, afterFailures int, nodeNam
 	if err != nil {
 		t.Fatal(err)
 	}
-	return testAlertObserver{
+	return alertObserverTest{
 		notifier: notify.NotifierFactory{}.Create(blueprint),
 		nodeName: nodeName,
 	}
 }
 
-func TestAlertsReachNotifierThroughObserver(t *testing.T) {
+func Test_alerts_reach_notifier_through_observer(t *testing.T) {
 	srv, hits := newAlertServer(t)
-	src := &fakeSource{err: model.Errorf("gateway unreachable")}
+	src := &fakeSourceTest{err: model.Errorf("gateway unreachable")}
 	observer := buildAlertObserver(t, srv.URL, 2, "node.example.com")
-	runner := buildTestAgent(t, src, &fakeProvider{}, testPlan(), filepath.Join(t.TempDir(), "s.json"),
+	runner := buildTestAgent(t, src, &fakeProviderTest{}, testPlan(), filepath.Join(t.TempDir(), "s.json"),
 		agent.OptionsData{Observers: []agent.IAgentObserver{observer}, NodeName: "node.example.com"})
 
 	runner.Tick(false)
@@ -97,12 +97,12 @@ func TestAlertsReachNotifierThroughObserver(t *testing.T) {
 	}
 }
 
-func TestAlertStateSurvivesRestart(t *testing.T) {
+func Test_alert_state_survives_restart(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "s.json")
 	srv, hits := newAlertServer(t)
 	makeRunner := func() *agent.Agent {
 		observer := buildAlertObserver(t, srv.URL, 1, "n")
-		return buildTestAgent(t, &fakeSource{err: model.Errorf("down")}, &fakeProvider{}, testPlan(), statePath,
+		return buildTestAgent(t, &fakeSourceTest{err: model.Errorf("down")}, &fakeProviderTest{}, testPlan(), statePath,
 			agent.OptionsData{Observers: []agent.IAgentObserver{observer}, NodeName: "n"})
 	}
 	makeRunner().Tick(false)
@@ -112,19 +112,19 @@ func TestAlertStateSurvivesRestart(t *testing.T) {
 	}
 }
 
-type countingObserver struct {
+type countingObserverTest struct {
 	seen []bool
 }
 
-func (observer *countingObserver) OnTick(result agent.TickResult, _ *agent.AgentState) {
+func (observer *countingObserverTest) OnTick(result agent.TickResult, _ *agent.AgentState) {
 	observer.seen = append(observer.seen, result.Ok)
 }
 
-func TestMultipleObserversReceiveEveryTick(t *testing.T) {
-	first := &countingObserver{}
-	second := &countingObserver{}
-	src := &fakeSource{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
-	runner := buildTestAgent(t, src, &fakeProvider{}, testPlan(), filepath.Join(t.TempDir(), "s.json"),
+func Test_multiple_observers_receive_every_tick(t *testing.T) {
+	first := &countingObserverTest{}
+	second := &countingObserverTest{}
+	src := &fakeSourceTest{data: endpoints("1.2.3.4", map[string]int{"mc": 51471})}
+	runner := buildTestAgent(t, src, &fakeProviderTest{}, testPlan(), filepath.Join(t.TempDir(), "s.json"),
 		agent.OptionsData{Observers: []agent.IAgentObserver{first, second}})
 
 	runner.Tick(false)
@@ -139,8 +139,8 @@ func TestMultipleObserversReceiveEveryTick(t *testing.T) {
 	}
 }
 
-func TestNoObserversIsSafe(t *testing.T) {
-	runner := buildTestAgent(t, &fakeSource{err: model.Errorf("down")}, &fakeProvider{}, testPlan(),
+func Test_no_observers_is_safe(t *testing.T) {
+	runner := buildTestAgent(t, &fakeSourceTest{err: model.Errorf("down")}, &fakeProviderTest{}, testPlan(),
 		filepath.Join(t.TempDir(), "s.json"), agent.OptionsData{})
 	if result := runner.Tick(false); result.Ok {
 		t.Error("expected failure report")

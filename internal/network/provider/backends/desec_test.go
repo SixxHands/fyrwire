@@ -12,7 +12,7 @@ import (
 	"github.com/sixxhands/fyrwire/internal/node/model"
 )
 
-type apiCall struct {
+type apiCallTest struct {
 	Method string
 	Path   string
 	Auth   string
@@ -20,16 +20,16 @@ type apiCall struct {
 }
 
 func testDesecServer(t *testing.T, onRequest func(w http.ResponseWriter, r *http.Request)) (
-	*DesecProvider, func() []apiCall) {
+	*DesecProvider, func() []apiCallTest) {
 	t.Helper()
-	var calls []apiCall
+	var calls []apiCallTest
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			body := make([]byte, r.ContentLength)
 			if r.ContentLength > 0 {
 				r.Body.Read(body)
 			}
-			calls = append(calls, apiCall{r.Method, r.URL.Path,
+			calls = append(calls, apiCallTest{r.Method, r.URL.Path,
 				r.Header.Get("Authorization"), string(body)})
 			onRequest(w, r)
 		}))
@@ -37,10 +37,10 @@ func testDesecServer(t *testing.T, onRequest func(w http.ResponseWriter, r *http
 	d := &DesecProvider{Token: "secret", Domain: "example.com",
 		client: &http.Client{Timeout: 5 * time.Second}, baseUrl: srv.URL,
 		minTtl: 60, minTtlAt: time.Now()}
-	return d, func() []apiCall { return calls }
+	return d, func() []apiCallTest { return calls }
 }
 
-func TestAuthSchemeIsTokenNotBearer(t *testing.T) {
+func Test_auth_scheme_is_token_not_bearer(t *testing.T) {
 	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"minimum_ttl":60}`))
 	})
@@ -51,7 +51,7 @@ func TestAuthSchemeIsTokenNotBearer(t *testing.T) {
 	}
 }
 
-func TestUrlsAlwaysEndInSlash(t *testing.T) {
+func Test_urls_always_end_in_slash(t *testing.T) {
 	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 	})
@@ -63,7 +63,7 @@ func TestUrlsAlwaysEndInSlash(t *testing.T) {
 	}
 }
 
-func TestApexIsAtSignInUrlsAndEmptyInJson(t *testing.T) {
+func Test_apex_is_at_sign_in_urls_and_empty_in_json(t *testing.T) {
 	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			w.WriteHeader(404)
@@ -91,7 +91,7 @@ func TestApexIsAtSignInUrlsAndEmptyInJson(t *testing.T) {
 	}
 }
 
-func TestWritesGoToCollectionEndpoint(t *testing.T) {
+func Test_writes_go_to_collection_endpoint(t *testing.T) {
 	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			w.WriteHeader(404)
@@ -107,7 +107,7 @@ func TestWritesGoToCollectionEndpoint(t *testing.T) {
 	}
 }
 
-func TestNotFoundOnWriteIsAnError(t *testing.T) {
+func Test_not_found_on_write_is_an_error(t *testing.T) {
 	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 		w.Write([]byte(`{"detail":"Not found."}`))
@@ -121,7 +121,7 @@ func TestNotFoundOnWriteIsAnError(t *testing.T) {
 	}
 }
 
-func TestHttpsBodyFormat(t *testing.T) {
+func Test_https_body_format(t *testing.T) {
 	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			w.WriteHeader(404)
@@ -144,7 +144,7 @@ func TestHttpsBodyFormat(t *testing.T) {
 	}
 }
 
-func TestReorderedAndQuotedParamsAreNotAChange(t *testing.T) {
+func Test_reordered_and_quoted_params_are_not_a_change(t *testing.T) {
 	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			json.NewEncoder(w).Encode(rrset{Ttl: 60,
@@ -168,7 +168,7 @@ func TestReorderedAndQuotedParamsAreNotAChange(t *testing.T) {
 	}
 }
 
-func TestMultiRecordRrsetIsNotRemoved(t *testing.T) {
+func Test_multi_record_rrset_is_not_removed(t *testing.T) {
 	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(rrset{Ttl: 60, Records: []string{
 			"0 5 51471 node.example.com.", "10 0 25565 backup.example.com."}})
@@ -187,7 +187,7 @@ func TestMultiRecordRrsetIsNotRemoved(t *testing.T) {
 	}
 }
 
-func TestWitnessChecksTargetNotAnyField(t *testing.T) {
+func Test_witness_checks_target_not_any_field(t *testing.T) {
 	d, calls := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(rrset{Ttl: 60,
 			Records: []string{"0 5 51471 somewhere-else.net."}})
@@ -202,7 +202,7 @@ func TestWitnessChecksTargetNotAnyField(t *testing.T) {
 	}
 }
 
-func TestRemoveWithoutWitnessIsRefused(t *testing.T) {
+func Test_remove_without_witness_is_refused(t *testing.T) {
 	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {})
 	_, err := d.Remove("SRV", "_mc._tcp.example.com", "")
 	if err == nil || !strings.Contains(err.Error(), "witness") {
@@ -210,7 +210,7 @@ func TestRemoveWithoutWitnessIsRefused(t *testing.T) {
 	}
 }
 
-func TestRateLimitReadsRetryAfter(t *testing.T) {
+func Test_rate_limit_reads_retry_after(t *testing.T) {
 	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "7")
 		w.WriteHeader(429)
@@ -226,7 +226,7 @@ func TestRateLimitReadsRetryAfter(t *testing.T) {
 	}
 }
 
-func TestTransientErrorsAreRetryableAndAuthErrorsAreNot(t *testing.T) {
+func Test_transient_errors_are_retryable_and_auth_errors_are_not(t *testing.T) {
 	for _, c := range []struct {
 		code      int
 		retryable bool
@@ -243,7 +243,7 @@ func TestTransientErrorsAreRetryableAndAuthErrorsAreNot(t *testing.T) {
 	}
 }
 
-func TestMissingMinimumTtlIsRefused(t *testing.T) {
+func Test_missing_minimum_ttl_is_refused(t *testing.T) {
 	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"name":"example.com"}`))
 	})
@@ -254,7 +254,7 @@ func TestMissingMinimumTtlIsRefused(t *testing.T) {
 	}
 }
 
-func TestTtlBelowMinimumIsRefused(t *testing.T) {
+func Test_ttl_below_minimum_is_refused(t *testing.T) {
 	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {})
 	d.minTtl, d.minTtlAt = 3600, time.Now()
 	_, err := d.EnsureA("node.example.com", "1.2.3.4", 60)
@@ -266,14 +266,14 @@ func TestTtlBelowMinimumIsRefused(t *testing.T) {
 	}
 }
 
-func TestNameOutsideDomainIsRefused(t *testing.T) {
+func Test_name_outside_domain_is_refused(t *testing.T) {
 	d, _ := testDesecServer(t, func(w http.ResponseWriter, r *http.Request) {})
 	if _, err := d.EnsureA("node.elsewhere.org", "1.2.3.4", 60); err == nil {
 		t.Error("expected a refusal")
 	}
 }
 
-func TestUrlEscapingKeepsApexAndWildcard(t *testing.T) {
+func Test_url_escaping_keeps_apex_and_wildcard(t *testing.T) {
 	d := &DesecProvider{Domain: "example.com", baseUrl: "http://x"}
 	if got := d.url("domains", "example.com", "rrsets", "@", "A"); !strings.Contains(got, "/@/") {
 		t.Errorf("apex must stay literal: %s", got)

@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestLinuxUsesXdgLayout(t *testing.T) {
+func Test_linux_uses_xdg_layout(t *testing.T) {
 	defer SetGoosForTest("linux")()
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", "")
@@ -20,7 +20,7 @@ func TestLinuxUsesXdgLayout(t *testing.T) {
 	}
 }
 
-func TestMacUsesApplicationSupport(t *testing.T) {
+func Test_mac_uses_application_support(t *testing.T) {
 	defer SetGoosForTest("darwin")()
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("FYRWIRE_CONFIG", "")
@@ -29,7 +29,7 @@ func TestMacUsesApplicationSupport(t *testing.T) {
 	}
 }
 
-func TestWindowsConfigRoamsAndStateStaysLocal(t *testing.T) {
+func Test_windows_config_roams_and_state_stays_local(t *testing.T) {
 	defer SetGoosForTest("windows")()
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", "")
@@ -48,7 +48,7 @@ func TestWindowsConfigRoamsAndStateStaysLocal(t *testing.T) {
 	}
 }
 
-func TestExplicitXdgWinsOnEveryPlatform(t *testing.T) {
+func Test_explicit_xdg_wins_on_every_platform(t *testing.T) {
 	for _, sys := range []string{"linux", "darwin", "windows"} {
 		t.Run(sys, func(t *testing.T) {
 			defer SetGoosForTest(sys)()
@@ -62,7 +62,7 @@ func TestExplicitXdgWinsOnEveryPlatform(t *testing.T) {
 	}
 }
 
-func TestExplicitEnvOverrideBeatsEverything(t *testing.T) {
+func Test_explicit_env_override_beats_everything(t *testing.T) {
 	defer SetGoosForTest("linux")()
 	t.Setenv("FYRWIRE_CONFIG", "/exact/path.toml")
 	if got := ConfigFile(); got != "/exact/path.toml" {
@@ -70,7 +70,7 @@ func TestExplicitEnvOverrideBeatsEverything(t *testing.T) {
 	}
 }
 
-func TestLegacyLocationsOnlyWhenLayoutDiffers(t *testing.T) {
+func Test_legacy_locations_only_when_layout_differs(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("FYRWIRE_CONFIG", "")

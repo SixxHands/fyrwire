@@ -83,7 +83,7 @@ func startNatPmpSource(t *testing.T, respond func(req []byte) []byte) *NatPmpSou
 	return &NatPmpSource{Gateway: host, Timeout: 1, Retries: 1}
 }
 
-func TestGrantedPortIsUsedNotRequested(t *testing.T) {
+func Test_granted_port_is_used_not_requested(t *testing.T) {
 	n := startNatPmpSource(t, func(req []byte) []byte {
 		switch req[1] {
 		case opPublicAddr:
@@ -107,7 +107,7 @@ func TestGrantedPortIsUsedNotRequested(t *testing.T) {
 	}
 }
 
-func TestUdpAndTcpUseDifferentOpcodes(t *testing.T) {
+func Test_udp_and_tcp_use_different_opcodes(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[byte]bool{}
 	n := startNatPmpSource(t, func(req []byte) []byte {
@@ -132,7 +132,7 @@ func TestUdpAndTcpUseDifferentOpcodes(t *testing.T) {
 	}
 }
 
-func TestOneFailedMappingIsPartial(t *testing.T) {
+func Test_one_failed_mapping_is_partial(t *testing.T) {
 	n := startNatPmpSource(t, func(req []byte) []byte {
 		switch req[1] {
 		case opPublicAddr:
@@ -160,7 +160,7 @@ func TestOneFailedMappingIsPartial(t *testing.T) {
 	}
 }
 
-func TestGatewayRefusalMentionsPortForwarding(t *testing.T) {
+func Test_gateway_refusal_mentions_port_forwarding(t *testing.T) {
 	n := startNatPmpSource(t, func(req []byte) []byte { return errorReply(req[1], 2) })
 	_, err := n.PublicAddress()
 	if err == nil || !strings.Contains(err.Error(), "port forwarding") {
@@ -168,7 +168,7 @@ func TestGatewayRefusalMentionsPortForwarding(t *testing.T) {
 	}
 }
 
-func TestNoReplyMentionsNatPmp(t *testing.T) {
+func Test_no_reply_mentions_nat_pmp(t *testing.T) {
 	n := &NatPmpSource{Gateway: "127.0.0.1", Timeout: 0.05, Retries: 1}
 	natpmpPortOverride(t, 1)
 	_, err := n.PublicAddress()
@@ -177,7 +177,7 @@ func TestNoReplyMentionsNatPmp(t *testing.T) {
 	}
 }
 
-func TestOutOfRangePortIsRefused(t *testing.T) {
+func Test_out_of_range_port_is_refused(t *testing.T) {
 	n := startNatPmpSource(t, func(req []byte) []byte { return mapReply(req[1], 1, 2) })
 	for _, bad := range []int{0, -1, 65536, 70000} {
 		if _, err := n.Map(bad, "tcp"); err == nil {
@@ -186,7 +186,7 @@ func TestOutOfRangePortIsRefused(t *testing.T) {
 	}
 }
 
-func TestPortZeroGrantIsRejected(t *testing.T) {
+func Test_port_zero_grant_is_rejected(t *testing.T) {
 	n := startNatPmpSource(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -203,7 +203,7 @@ func TestPortZeroGrantIsRejected(t *testing.T) {
 	}
 }
 
-func TestFractionalTimeoutIsNotTruncated(t *testing.T) {
+func Test_fractional_timeout_is_not_truncated(t *testing.T) {
 	n := startNatPmpSource(t, func(req []byte) []byte {
 		time.Sleep(120 * time.Millisecond)
 		return publicAddrReply([4]byte{9, 9, 9, 9})
@@ -218,7 +218,7 @@ func TestFractionalTimeoutIsNotTruncated(t *testing.T) {
 	}
 }
 
-func TestSubstitutedInternalPortIsDetectedAsSinglePort(t *testing.T) {
+func Test_substituted_internal_port_is_detected_as_single_port(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{203, 0, 113, 49})
@@ -247,7 +247,7 @@ func TestSubstitutedInternalPortIsDetectedAsSinglePort(t *testing.T) {
 	}
 }
 
-func TestConformingGatewayGetsPerServiceMappings(t *testing.T) {
+func Test_conforming_gateway_gets_per_service_mappings(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -274,7 +274,7 @@ func TestConformingGatewayGetsPerServiceMappings(t *testing.T) {
 	}
 }
 
-func TestServicesSharePortOnSinglePortGateway(t *testing.T) {
+func Test_services_share_port_on_single_port_gateway(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -305,7 +305,7 @@ func TestServicesSharePortOnSinglePortGateway(t *testing.T) {
 	}
 }
 
-func TestMismatchedInternalPortReplyIsRejected(t *testing.T) {
+func Test_mismatched_internal_port_reply_is_rejected(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -324,7 +324,7 @@ func TestMismatchedInternalPortReplyIsRejected(t *testing.T) {
 	}
 }
 
-func TestGrantedLeaseIsRecordedAndWarnsWhenShort(t *testing.T) {
+func Test_granted_lease_is_recorded_and_warns_when_short(t *testing.T) {
 	addr := fakeGateway(t, func(req []byte) []byte {
 		if req[1] == opPublicAddr {
 			return publicAddrReply([4]byte{1, 2, 3, 4})
@@ -349,7 +349,7 @@ func TestGrantedLeaseIsRecordedAndWarnsWhenShort(t *testing.T) {
 	}
 }
 
-func TestGatewayRestartIsDetected(t *testing.T) {
+func Test_gateway_restart_is_detected(t *testing.T) {
 	var epoch atomic.Uint32
 	epoch.Store(5000)
 	addr := fakeGateway(t, func(req []byte) []byte {

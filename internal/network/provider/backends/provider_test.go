@@ -7,7 +7,7 @@ import (
 	"github.com/sixxhands/fyrwire/internal/network/provider"
 )
 
-func TestTargetOfKnowsWhereTheHostnameLives(t *testing.T) {
+func Test_target_of_knows_where_the_hostname_lives(t *testing.T) {
 	for _, c := range []struct{ recordType, value, want string }{
 		{"SRV", "0 5 51471 node.example.com.", "node.example.com."},
 		{"HTTPS", "1 node.example.com. port=51471", "node.example.com."},
@@ -21,7 +21,7 @@ func TestTargetOfKnowsWhereTheHostnameLives(t *testing.T) {
 	}
 }
 
-func TestIpLiteralTargetIsRefusedWithTheReason(t *testing.T) {
+func Test_ip_literal_target_is_refused_with_the_reason(t *testing.T) {
 	err := provider.CheckTarget("203.0.113.5")
 	if err == nil {
 		t.Fatal("expected a refusal")
@@ -31,7 +31,7 @@ func TestIpLiteralTargetIsRefusedWithTheReason(t *testing.T) {
 	}
 }
 
-func TestUnderscoreInTargetIsRefused(t *testing.T) {
+func Test_underscore_in_target_is_refused(t *testing.T) {
 	if err := provider.CheckTarget("node_1.example.com"); err == nil {
 		t.Error("expected a refusal")
 	}
@@ -40,7 +40,7 @@ func TestUnderscoreInTargetIsRefused(t *testing.T) {
 	}
 }
 
-func TestStandardValueComparesEquivalentRecordsEqual(t *testing.T) {
+func Test_standard_value_compares_equivalent_records_equal(t *testing.T) {
 	a := `1 node.example.com. port=51471 alpn=h2`
 	b := `1 node.example.com. alpn="h2" port="51471"`
 	if provider.StandardValue("HTTPS", a) != provider.StandardValue("HTTPS", b) {
@@ -55,7 +55,7 @@ func TestStandardValueComparesEquivalentRecordsEqual(t *testing.T) {
 	}
 }
 
-func TestErrorBodiesAreFlattened(t *testing.T) {
+func Test_error_bodies_are_flattened(t *testing.T) {
 	got := provider.JsonOr([]byte(`{"ttl":["Ensure this value is >= 3600."]}`), "x")
 	if !strings.Contains(got, "Ensure this value") || !strings.Contains(got, "ttl") {
 		t.Errorf("got %q", got)
@@ -68,7 +68,7 @@ func TestErrorBodiesAreFlattened(t *testing.T) {
 	}
 }
 
-func TestBothProvidersAreRegistered(t *testing.T) {
+func Test_both_providers_are_registered(t *testing.T) {
 	have := map[string]bool{}
 	for _, n := range provider.Available() {
 		have[n] = true

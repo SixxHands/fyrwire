@@ -34,7 +34,7 @@ func testRecorder(t *testing.T) (*notify.Notifier, func() int) {
 	}
 }
 
-func TestFailuresAreDebounced(t *testing.T) {
+func Test_failures_are_debounced(t *testing.T) {
 	notifier, sent := testRecorder(t)
 	state := &notify.AlertState{}
 	notifier.CheckTransitions(notify.AlertStatusData{Ok: false, Failures: 1, Error: "x"}, state, "node")
@@ -47,7 +47,7 @@ func TestFailuresAreDebounced(t *testing.T) {
 	}
 }
 
-func TestAlertsFireOnTransitionsOnly(t *testing.T) {
+func Test_alerts_fire_on_transitions_only(t *testing.T) {
 	notifier, sent := testRecorder(t)
 	state := &notify.AlertState{}
 	for count := 2; count < 10; count++ {
@@ -58,7 +58,7 @@ func TestAlertsFireOnTransitionsOnly(t *testing.T) {
 	}
 }
 
-func TestRecoveryIsImmediate(t *testing.T) {
+func Test_recovery_is_immediate(t *testing.T) {
 	notifier, sent := testRecorder(t)
 	state := &notify.AlertState{}
 	notifier.CheckTransitions(notify.AlertStatusData{Ok: false, Failures: 2, Error: "x"}, state, "node")
@@ -71,7 +71,7 @@ func TestRecoveryIsImmediate(t *testing.T) {
 	}
 }
 
-func TestPerServiceOutageReportedOnceEachWay(t *testing.T) {
+func Test_per_service_outage_reported_once_each_way(t *testing.T) {
 	notifier, sent := testRecorder(t)
 	state := &notify.AlertState{}
 	notifier.CheckTransitions(notify.AlertStatusData{Ok: true, Host: "h", Skipped: []string{"vh"}}, state, "node")
@@ -88,7 +88,7 @@ func TestPerServiceOutageReportedOnceEachWay(t *testing.T) {
 	}
 }
 
-func TestBrokenWebhookDoesNotStopStateAdvance(t *testing.T) {
+func Test_broken_webhook_does_not_stop_state_advance(t *testing.T) {
 	blueprint, err := notify.CreateNotifierBlueprint("http://127.0.0.1:1", "", 1, time.Second, func(string) {})
 	if err != nil {
 		t.Fatal(err)
@@ -101,23 +101,23 @@ func TestBrokenWebhookDoesNotStopStateAdvance(t *testing.T) {
 	}
 }
 
-type recordedAlert struct {
+type recordedAlertTest struct {
 	title string
 	body  string
 	color int
 }
 
-type memoryChannel struct {
-	alerts []recordedAlert
+type memoryChannelTest struct {
+	alerts []recordedAlertTest
 }
 
-func (channel *memoryChannel) Send(title, body string, color int) error {
-	channel.alerts = append(channel.alerts, recordedAlert{title: title, body: body, color: color})
+func (channel *memoryChannelTest) Send(title, body string, color int) error {
+	channel.alerts = append(channel.alerts, recordedAlertTest{title: title, body: body, color: color})
 	return nil
 }
 
-func TestCustomAlertChannelStrategyReceivesTransitions(t *testing.T) {
-	channel := &memoryChannel{}
+func Test_custom_alert_channel_strategy_receives_transitions(t *testing.T) {
+	channel := &memoryChannelTest{}
 	blueprint, err := notify.CreateNotifierBlueprint("", "", 1, 0, nil, channel)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestCustomAlertChannelStrategyReceivesTransitions(t *testing.T) {
 	}
 }
 
-func TestWebhookChannelSelectsFormatterByUrl(t *testing.T) {
+func Test_webhook_channel_selects_formatter_by_url(t *testing.T) {
 	cases := []struct {
 		name      string
 		url       string

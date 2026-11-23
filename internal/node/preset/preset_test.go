@@ -2,7 +2,7 @@ package preset
 
 import "testing"
 
-func TestEveryServiceLabelIsWellFormed(t *testing.T) {
+func Test_every_service_label_is_well_formed(t *testing.T) {
 	for _, p := range All {
 		if p.Service == "" {
 			continue
@@ -13,7 +13,7 @@ func TestEveryServiceLabelIsWellFormed(t *testing.T) {
 	}
 }
 
-func TestServiceValidationRejectsInvalidLabels(t *testing.T) {
+func Test_service_validation_rejects_invalid_labels(t *testing.T) {
 	for _, bad := range []string{
 		"", "-lead", "trail-", "two--hyphens", "1234", "way-too-long-a-label",
 		"has space", "under_score",
@@ -29,7 +29,7 @@ func TestServiceValidationRejectsInvalidLabels(t *testing.T) {
 	}
 }
 
-func TestFollowsIsValid(t *testing.T) {
+func Test_follows_is_valid(t *testing.T) {
 	for _, p := range All {
 		switch p.Follows {
 		case "srv", "srv-setup", "manual":
@@ -39,7 +39,7 @@ func TestFollowsIsValid(t *testing.T) {
 	}
 }
 
-func TestNonSrvPresetsHaveNotes(t *testing.T) {
+func Test_non_srv_presets_have_notes(t *testing.T) {
 	for _, p := range All {
 		if p.Follows != "srv" && p.Note == "" {
 			t.Errorf("%s claims follows=%q without a note", p.Key, p.Follows)
@@ -47,7 +47,7 @@ func TestNonSrvPresetsHaveNotes(t *testing.T) {
 	}
 }
 
-func TestEveryPresetIsInAKnownGroup(t *testing.T) {
+func Test_every_preset_is_in_a_known_group(t *testing.T) {
 	known := map[string]bool{}
 	for _, g := range Groups {
 		known[g] = true
@@ -59,7 +59,7 @@ func TestEveryPresetIsInAKnownGroup(t *testing.T) {
 	}
 }
 
-func TestProtocolAndRecordAreValid(t *testing.T) {
+func Test_protocol_and_record_are_valid(t *testing.T) {
 	for _, p := range All {
 		if p.Protocol != "tcp" && p.Protocol != "udp" {
 			t.Errorf("%s: protocol %q", p.Key, p.Protocol)
@@ -72,7 +72,7 @@ func TestProtocolAndRecordAreValid(t *testing.T) {
 	}
 }
 
-func TestLookupWorks(t *testing.T) {
+func Test_lookup_works(t *testing.T) {
 	if _, ok := Get("minecraft"); !ok {
 		t.Error("minecraft must be present")
 	}

@@ -43,7 +43,7 @@ srv_name = "_valheim._udp.vh.example.com"
 interval = 45
 `
 
-func TestRemoveServicePreservesRestOfFile(t *testing.T) {
+func Test_remove_service_preserves_rest_of_file(t *testing.T) {
 	got := removeServiceBlock(sample, "valheim")
 	if strings.Contains(got, "valheim") {
 		t.Error("service is still present")
@@ -57,7 +57,7 @@ func TestRemoveServicePreservesRestOfFile(t *testing.T) {
 	}
 }
 
-func TestRemovedResultStillParses(t *testing.T) {
+func Test_removed_result_still_parses(t *testing.T) {
 	got := removeServiceBlock(sample, "minecraft")
 	loaded, err := config.ReadText(got)
 	if err != nil {
@@ -68,13 +68,13 @@ func TestRemovedResultStillParses(t *testing.T) {
 	}
 }
 
-func TestRemovingAbsentServiceChangesNothing(t *testing.T) {
+func Test_removing_absent_service_changes_nothing(t *testing.T) {
 	if got := removeServiceBlock(sample, "nope"); got != sample {
 		t.Error("unmatched name must leave file untouched")
 	}
 }
 
-func TestStarterConfigIsValid(t *testing.T) {
+func Test_starter_config_is_valid(t *testing.T) {
 	t.Setenv("FYRWIRE_CF_TOKEN", "t")
 	t.Setenv("FYRWIRE_CF_ZONE", "z")
 	if _, err := config.ReadText(Starter); err != nil {
@@ -82,7 +82,7 @@ func TestStarterConfigIsValid(t *testing.T) {
 	}
 }
 
-func TestZoneDerivedFromProvider(t *testing.T) {
+func Test_zone_derived_from_provider(t *testing.T) {
 	loaded, err := config.ReadText(sample)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestZoneDerivedFromProvider(t *testing.T) {
 	}
 }
 
-func TestRemovingOnlyServiceIsRefused(t *testing.T) {
+func Test_removing_only_service_is_refused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "one.toml")
 	one := `[source]
 type = "static"

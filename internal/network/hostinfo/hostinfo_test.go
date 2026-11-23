@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestLocalAddressTowardAnswersWithoutSendingPackets(t *testing.T) {
+func Test_local_address_toward_answers_without_sending_packets(t *testing.T) {
 	addr := LocalAddressToward("1.1.1.1")
 	if addr == "" {
 		t.Skip("no route to the internet in this environment")
@@ -17,7 +17,7 @@ func TestLocalAddressTowardAnswersWithoutSendingPackets(t *testing.T) {
 	}
 }
 
-func TestSubnetRouterTakesTheDotOne(t *testing.T) {
+func Test_subnet_router_takes_the_dot_one(t *testing.T) {
 	if got := SubnetRouter("10.2.0.57"); got != "10.2.0.1" {
 		t.Errorf("got %q", got)
 	}
@@ -26,7 +26,7 @@ func TestSubnetRouterTakesTheDotOne(t *testing.T) {
 	}
 }
 
-func TestSubnetRouterDoesNotCorruptItsInput(t *testing.T) {
+func Test_subnet_router_does_not_corrupt_its_input(t *testing.T) {
 	addr := "192.168.1.42"
 	_ = SubnetRouter(addr)
 	if addr != "192.168.1.42" {
@@ -34,7 +34,7 @@ func TestSubnetRouterDoesNotCorruptItsInput(t *testing.T) {
 	}
 }
 
-func TestIsTunnelRecognizesVpnInterfaces(t *testing.T) {
+func Test_is_tunnel_recognizes_vpn_interfaces(t *testing.T) {
 	for _, c := range []struct {
 		iface InterfaceData
 		want  bool
@@ -51,7 +51,7 @@ func TestIsTunnelRecognizesVpnInterfaces(t *testing.T) {
 	}
 }
 
-func TestInterfacesEnumeratesWithoutShellingOut(t *testing.T) {
+func Test_interfaces_enumerates_without_shelling_out(t *testing.T) {
 	got := Interfaces()
 	if len(got) == 0 {
 		t.Skip("no non-loopback IPv4 interfaces here")
@@ -66,7 +66,7 @@ func TestInterfacesEnumeratesWithoutShellingOut(t *testing.T) {
 	}
 }
 
-func TestOnlyLinuxClaimsToBeVerified(t *testing.T) {
+func Test_only_linux_claims_to_be_verified(t *testing.T) {
 	if !(linuxBackend{}).Verified() {
 		t.Error("linux backend should be marked verified")
 	}
@@ -77,7 +77,7 @@ func TestOnlyLinuxClaimsToBeVerified(t *testing.T) {
 	}
 }
 
-func TestUntestedBackendsReportNote(t *testing.T) {
+func Test_untested_backends_report_note(t *testing.T) {
 	ok, why := macBackend{}.Health()
 	if !ok {
 		t.Skip("lsof and netstat both absent here")
@@ -87,7 +87,7 @@ func TestUntestedBackendsReportNote(t *testing.T) {
 	}
 }
 
-func TestUnknownPlatformExplainsWhatStillWorks(t *testing.T) {
+func Test_unknown_platform_explains_what_still_works(t *testing.T) {
 	ok, why := fallbackBackend{}.Health()
 	if ok {
 		t.Error("an unknown platform cannot list ports")
@@ -97,7 +97,7 @@ func TestUnknownPlatformExplainsWhatStillWorks(t *testing.T) {
 	}
 }
 
-func TestLinuxFindsAPortWeJustOpened(t *testing.T) {
+func Test_linux_finds_a_port_we_just_opened(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("linux only")
 	}

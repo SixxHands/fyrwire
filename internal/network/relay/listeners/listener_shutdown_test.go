@@ -41,7 +41,7 @@ func quietBackend(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-func TestStopReturnsWithIdleConnectionOpen(t *testing.T) {
+func Test_stop_returns_with_idle_connection_open(t *testing.T) {
 	backend := quietBackend(t)
 	front := freePort(t)
 	bp, err := tcp.CreateListenerBlueprint("a", net.JoinHostPort("127.0.0.1", strconv.Itoa(front)), net.JoinHostPort("127.0.0.1", strconv.Itoa(backend)), func(string) {})
@@ -68,7 +68,7 @@ func TestStopReturnsWithIdleConnectionOpen(t *testing.T) {
 	}
 }
 
-func TestPortRotationCompletesWhileConnectionIsLive(t *testing.T) {
+func Test_port_rotation_completes_while_connection_is_live(t *testing.T) {
 	backend := quietBackend(t)
 	m := relay.ManagerFactory{}.Create(relay.CreateManagerBlueprint(func(string) {}, relay.UdpOptionsData{}))
 	defer m.Stop()
@@ -98,7 +98,7 @@ func TestPortRotationCompletesWhileConnectionIsLive(t *testing.T) {
 	}
 }
 
-func TestUdpRotationUnderTrafficCompletes(t *testing.T) {
+func Test_udp_rotation_under_traffic_completes(t *testing.T) {
 	backend, _ := udpEcho(t, "x")
 	m := relay.ManagerFactory{}.Create(relay.CreateManagerBlueprint(func(string) {}, relay.UdpOptionsData{}))
 	defer m.Stop()

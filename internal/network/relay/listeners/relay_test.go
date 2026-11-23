@@ -99,7 +99,7 @@ func createTestManager() *relay.Manager {
 	return relay.ManagerFactory{}.Create(relay.CreateManagerBlueprint(nil, relay.UdpOptionsData{}))
 }
 
-func TestUdpDatagramRoundTrips(t *testing.T) {
+func Test_udp_datagram_round_trips(t *testing.T) {
 	backend, _ := udpEcho(t, "one")
 	m := createTestManager()
 	defer m.Stop()
@@ -110,7 +110,7 @@ func TestUdpDatagramRoundTrips(t *testing.T) {
 	}
 }
 
-func TestTwoClientsGetSeparateUpstreamSockets(t *testing.T) {
+func Test_two_clients_get_separate_upstream_sockets(t *testing.T) {
 	backend, seen := udpEcho(t, "x")
 	m := createTestManager()
 	defer m.Stop()
@@ -127,7 +127,7 @@ func TestTwoClientsGetSeparateUpstreamSockets(t *testing.T) {
 	}
 }
 
-func TestReplySourcePortIsGrantedPort(t *testing.T) {
+func Test_reply_source_port_is_granted_port(t *testing.T) {
 	backend, _ := udpEcho(t, "src")
 	m := createTestManager()
 	defer m.Stop()
@@ -154,7 +154,7 @@ func TestReplySourcePortIsGrantedPort(t *testing.T) {
 	}
 }
 
-func TestUnchangedListenerIsNotRebound(t *testing.T) {
+func Test_unchanged_listener_is_not_rebound(t *testing.T) {
 	backend, _ := udpEcho(t, "z")
 	m := createTestManager()
 	defer m.Stop()
@@ -166,7 +166,7 @@ func TestUnchangedListenerIsNotRebound(t *testing.T) {
 	}
 }
 
-func TestProtocolIsPartOfBinding(t *testing.T) {
+func Test_protocol_is_part_of_binding(t *testing.T) {
 	a := relay.BindingData{BindHost: "127.0.0.1", BindPort: 1, TargetHost: "127.0.0.1", TargetPort: 2, Protocol: "tcp"}
 	b := relay.BindingData{BindHost: "127.0.0.1", BindPort: 1, TargetHost: "127.0.0.1", TargetPort: 2, Protocol: "udp"}
 	if a == b {
@@ -174,7 +174,7 @@ func TestProtocolIsPartOfBinding(t *testing.T) {
 	}
 }
 
-func TestRotatingOnePortLeavesOtherAlone(t *testing.T) {
+func Test_rotating_one_port_leaves_other_alone(t *testing.T) {
 	be1, _ := udpEcho(t, "p")
 	be2, _ := udpEcho(t, "q")
 	m := createTestManager()
@@ -195,7 +195,7 @@ func TestRotatingOnePortLeavesOtherAlone(t *testing.T) {
 	}
 }
 
-func TestBindFailureOnOneKeySparesOthers(t *testing.T) {
+func Test_bind_failure_on_one_key_spares_others(t *testing.T) {
 	backend, _ := udpEcho(t, "ok")
 	blocker, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -226,7 +226,7 @@ func TestBindFailureOnOneKeySparesOthers(t *testing.T) {
 	}
 }
 
-func TestTcpRelayForwards(t *testing.T) {
+func Test_tcp_relay_forwards(t *testing.T) {
 	backend := tcpEcho(t, "t")
 	m := createTestManager()
 	defer m.Stop()
@@ -246,7 +246,7 @@ func TestTcpRelayForwards(t *testing.T) {
 	}
 }
 
-func TestStatsShapeForBothProtocols(t *testing.T) {
+func Test_stats_shape_for_both_protocols(t *testing.T) {
 	be, _ := udpEcho(t, "s")
 	tbe := tcpEcho(t, "s")
 	m := createTestManager()

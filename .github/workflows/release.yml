@@ -1,0 +1,38 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: Cross-compile binaries
+        run: VERSION="${GITHUB_REF_NAME}" make release
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/fyrwire-* dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" dist/fyrwire-* dist/SHA256SUMS --title "$TAG" --generate-notes
+          fi

@@ -2,7 +2,6 @@ package install
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -22,7 +21,7 @@ func Launcher(configPath string) []string {
 
 // Warn if someone ran 'fyrwire install' straight out of dist/ or build/. The next rebuild will delete the service binary
 func BuildDirWarning(exe string) string {
-	slashed := filepath.ToSlash(exe)
+	slashed := strings.ReplaceAll(exe, "\\", "/")
 	for _, dir := range []string{"/dist/", "/build/", "/target/", "/_output/"} {
 		if strings.Contains(slashed, dir) {
 			return "the binary being installed is at " + exe + ",\n" +
